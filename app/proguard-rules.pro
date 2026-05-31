@@ -1,0 +1,2 @@
+-keep class com.theycallmeboxy.caulker.data.api.model.** { *; }
+-keepclassmembers class com.theycallmeboxy.caulker.data.api.model.** { *; }
