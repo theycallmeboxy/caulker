@@ -16,5 +16,8 @@ local.properties
 *.hprof
 .idea/
 
+# VS Code (machine-local JDK/Gradle paths)
+.vscode/
+
 # Kotlin
 .kotlin/

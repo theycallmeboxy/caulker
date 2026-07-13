@@ -6,7 +6,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.theycallmeboxy.caulker.ui.screens.collections.CollectionGamesScreen
 import com.theycallmeboxy.caulker.ui.screens.collections.CollectionsScreen
 import com.theycallmeboxy.caulker.ui.screens.dashboard.DashboardScreen
 import com.theycallmeboxy.caulker.ui.screens.firmware.FirmwareScreen
@@ -45,9 +44,6 @@ sealed class Screen(val route: String) {
     }
     object SyncProgress : Screen("sync_progress")
     object Collections : Screen("collections")
-    object CollectionGames : Screen("collection/{collectionId}") {
-        fun route(collectionId: Int) = "collection/$collectionId"
-    }
 }
 
 @Composable
@@ -84,17 +80,6 @@ fun AppNavigation(startDestination: String) {
 
         composable(Screen.Collections.route) {
             CollectionsScreen(
-                onCollectionClick = { navController.navigate(Screen.CollectionGames.route(it)) },
-                onBack = { navController.popBackStack() }
-            )
-        }
-
-        composable(
-            route = Screen.CollectionGames.route,
-            arguments = listOf(navArgument("collectionId") { type = NavType.IntType })
-        ) {
-            CollectionGamesScreen(
-                onGameClick = { navController.navigate(Screen.GameDetail.route(it)) },
                 onBack = { navController.popBackStack() }
             )
         }

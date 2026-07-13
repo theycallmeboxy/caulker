@@ -3,10 +3,26 @@ package com.theycallmeboxy.caulker.data.api.model
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 
+// RomM 4.9 heartbeat is a nested structure ({SYSTEM:{VERSION,...}, METADATA_SOURCES:{...}}).
+// The `version` / `anySourceSupported` accessors keep the old flat call-sites working.
 @JsonClass(generateAdapter = true)
 data class HeartbeatResponse(
-    val version: String,
-    @Json(name = "any_source_supported") val anySourceSupported: Boolean = false
+    @Json(name = "SYSTEM") val system: HeartbeatSystem? = null,
+    @Json(name = "METADATA_SOURCES") val metadataSources: HeartbeatMetadataSources? = null
+) {
+    val version: String get() = system?.version ?: "unknown"
+    val anySourceSupported: Boolean get() = metadataSources?.anySourceEnabled ?: false
+}
+
+@JsonClass(generateAdapter = true)
+data class HeartbeatSystem(
+    @Json(name = "VERSION") val version: String? = null,
+    @Json(name = "SHOW_SETUP_WIZARD") val showSetupWizard: Boolean = false
+)
+
+@JsonClass(generateAdapter = true)
+data class HeartbeatMetadataSources(
+    @Json(name = "ANY_SOURCE_ENABLED") val anySourceEnabled: Boolean = false
 )
 
 @JsonClass(generateAdapter = true)
@@ -73,6 +89,21 @@ data class RomPageResponse(
     val limit: Int
 )
 
+// Virtual collections (RomM 4.9) are auto-generated groupings with STRING ids
+// (e.g. "genre:rpg") and a `type`. They are browse-only and not cached to Room
+// (which is int-keyed); ROMs are listed via getRoms(virtualCollectionId = id).
+@JsonClass(generateAdapter = true)
+data class VirtualCollectionResponse(
+    val id: String,
+    val name: String,
+    val type: String? = null,
+    @Json(name = "rom_count") val romCount: Int = 0,
+    @Json(name = "rom_ids") val romIds: List<Int> = emptyList(),
+    val description: String? = null,
+    @Json(name = "path_cover_small") val coverPathSmall: String? = null,
+    @Json(name = "path_cover_large") val coverPathLarge: String? = null
+)
+
 @JsonClass(generateAdapter = true)
 data class CollectionResponse(
     val id: Int,
@@ -103,15 +134,24 @@ data class SaveResponse(
     val slot: String? = null,
     val emulator: String? = null,
     @Json(name = "file_name") val fileName: String,
-    @Json(name = "file_size") val fileSize: Long = 0,
+    @Json(name = "file_size_bytes") val fileSize: Long = 0,
+    @Json(name = "content_hash") val contentHash: String? = null,
     @Json(name = "updated_at") val updatedAt: String? = null,
     @Json(name = "device_syncs") val deviceSyncs: List<DeviceSaveSync> = emptyList()
 )
 
+// RomM 4.9 shape: { total_count, slots:[{slot, count, latest: SaveSchema}] }.
 @JsonClass(generateAdapter = true)
 data class SaveSummaryResponse(
-    @Json(name = "rom_id") val romId: Int? = null,
-    val slots: List<SaveSlotResponse> = emptyList()
+    @Json(name = "total_count") val totalCount: Int = 0,
+    val slots: List<SlotSummaryResponse> = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
+data class SlotSummaryResponse(
+    val slot: String? = null,
+    val count: Int = 0,
+    val latest: SaveResponse? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -134,10 +174,11 @@ data class SaveSlotResponse(
 @JsonClass(generateAdapter = true)
 data class DeviceResponse(
     @Json(name = "device_id") val id: String,
-    val name: String,
+    val name: String? = null,
     val platform: String? = null,
     val client: String = "caulker",
     @Json(name = "client_version") val clientVersion: String? = null,
+    @Json(name = "sync_mode") val syncMode: String? = null,
     @Json(name = "sync_enabled") val syncEnabled: Boolean = true,
     @Json(name = "created_at") val createdAt: String? = null
 )
@@ -147,7 +188,10 @@ data class RegisterDeviceRequest(
     val name: String,
     val platform: String = "android",
     val client: String = "caulker",
-    @Json(name = "client_version") val clientVersion: String
+    @Json(name = "client_version") val clientVersion: String,
+    // RomM 4.9 sync modes: api | file_transfer | push_pull. Caulker uses the
+    // API-coordinated mode (sync_enabled defaults to true server-side).
+    @Json(name = "sync_mode") val syncMode: String = "api"
 )
 
 @JsonClass(generateAdapter = true)
@@ -176,4 +220,70 @@ data class ExchangeCodeRequest(
 data class TokenResponse(
     @Json(name = "raw_token") val accessToken: String,
     @Json(name = "token_type") val tokenType: String = "bearer"
+)
+
+// --- Save sync engine (RomM 4.9) ---
+
+// One local save's state, sent to /api/sync/negotiate so the server can decide
+// the per-save action. Server pairs client↔server saves on (rom_id, slot).
+@JsonClass(generateAdapter = true)
+data class ClientSaveState(
+    @Json(name = "rom_id") val romId: Int,
+    @Json(name = "file_name") val fileName: String,
+    val slot: String? = null,
+    val emulator: String? = null,
+    // MD5 hex of the file — lets the server short-circuit identical content as no_op.
+    @Json(name = "content_hash") val contentHash: String? = null,
+    @Json(name = "updated_at") val updatedAt: String,
+    @Json(name = "file_size_bytes") val fileSizeBytes: Long = 0
+)
+
+@JsonClass(generateAdapter = true)
+data class SyncNegotiateRequest(
+    @Json(name = "device_id") val deviceId: String,
+    val saves: List<ClientSaveState>
+)
+
+@JsonClass(generateAdapter = true)
+data class SyncOperation(
+    val action: String, // upload | download | conflict | no_op
+    @Json(name = "rom_id") val romId: Int,
+    @Json(name = "save_id") val saveId: Int? = null,
+    @Json(name = "file_name") val fileName: String,
+    val slot: String? = null,
+    val emulator: String? = null,
+    val reason: String? = null,
+    @Json(name = "server_updated_at") val serverUpdatedAt: String? = null,
+    @Json(name = "server_content_hash") val serverContentHash: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class SyncNegotiateResponse(
+    @Json(name = "session_id") val sessionId: Int,
+    val operations: List<SyncOperation> = emptyList(),
+    @Json(name = "total_upload") val totalUpload: Int = 0,
+    @Json(name = "total_download") val totalDownload: Int = 0,
+    @Json(name = "total_conflict") val totalConflict: Int = 0,
+    @Json(name = "total_no_op") val totalNoOp: Int = 0
+)
+
+@JsonClass(generateAdapter = true)
+data class SyncCompleteRequest(
+    @Json(name = "operations_completed") val operationsCompleted: Int = 0,
+    @Json(name = "operations_failed") val operationsFailed: Int = 0
+)
+
+@JsonClass(generateAdapter = true)
+data class SyncSessionResponse(
+    val id: Int,
+    @Json(name = "device_id") val deviceId: String? = null,
+    val status: String? = null,
+    @Json(name = "operations_planned") val operationsPlanned: Int = 0,
+    @Json(name = "operations_completed") val operationsCompleted: Int = 0,
+    @Json(name = "operations_failed") val operationsFailed: Int = 0
+)
+
+@JsonClass(generateAdapter = true)
+data class SyncCompleteResponse(
+    val session: SyncSessionResponse? = null
 )

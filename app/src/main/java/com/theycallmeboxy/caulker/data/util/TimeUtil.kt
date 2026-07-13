@@ -20,6 +20,10 @@ fun parseIsoToMs(iso: String?): Long? {
     }
 }
 
+// Epoch millis -> ISO-8601 UTC string (e.g. 2026-06-06T12:34:56.789Z), which
+// RomM's pydantic datetime fields accept. Used for sync negotiation / play sessions.
+fun msToIso(ms: Long): String = Instant.ofEpochMilli(ms).toString()
+
 fun formatTimestamp(ms: Long): String {
     if (ms == 0L) return "Unknown"
     val ldt = LocalDateTime.ofInstant(Instant.ofEpochMilli(ms), ZoneId.systemDefault())

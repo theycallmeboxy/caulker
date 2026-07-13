@@ -31,6 +31,7 @@ fun SettingsScreen(
     val romPath by viewModel.romPath.collectAsState()
     val savePath by viewModel.savePath.collectAsState()
     val biosPath by viewModel.biosPath.collectAsState()
+    val serverVersion by viewModel.serverVersion.collectAsState()
     var showLogoutDialog by remember { mutableStateOf(false) }
     var showResyncDialog by remember { mutableStateOf(false) }
 
@@ -169,6 +170,15 @@ fun SettingsScreen(
                 )
             ) {
                 Text("Logout")
+            }
+
+            serverVersion?.let { version ->
+                Text(
+                    "RomM server v$version",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                )
             }
         }
     }

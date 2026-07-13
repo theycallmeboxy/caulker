@@ -4,14 +4,19 @@ import android.content.Context
 import com.theycallmeboxy.caulker.BuildConfig
 import com.theycallmeboxy.caulker.data.api.RommApiService
 import com.theycallmeboxy.caulker.data.api.SaveConflictException
+import com.theycallmeboxy.caulker.data.api.model.ClientSaveState
 import com.theycallmeboxy.caulker.data.api.model.MarkDownloadedRequest
 import com.theycallmeboxy.caulker.data.api.model.RegisterDeviceRequest
 import com.theycallmeboxy.caulker.data.api.model.SaveResponse
+import com.theycallmeboxy.caulker.data.api.model.SyncCompleteRequest
+import com.theycallmeboxy.caulker.data.api.model.SyncNegotiateRequest
+import com.theycallmeboxy.caulker.data.api.model.SyncNegotiateResponse
 import com.theycallmeboxy.caulker.data.db.dao.SaveDao
 import com.theycallmeboxy.caulker.data.db.entity.SaveEntity
 import com.theycallmeboxy.caulker.data.prefs.PlatformOverrideMode
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import com.theycallmeboxy.caulker.data.util.RootFileHelper
+import com.theycallmeboxy.caulker.data.util.md5Hex
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 import retrofit2.HttpException
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -27,6 +32,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 data class BackupInfo(val count: Int, val latestMs: Long)
+
+// Local save fingerprint used to build a ClientSaveState for sync negotiation.
+data class LocalSaveStat(val contentHash: String, val sizeBytes: Long, val modifiedMs: Long)
 
 @Singleton
 class SaveRepository @Inject constructor(
@@ -77,6 +85,22 @@ class SaveRepository @Inject constructor(
         return rootHelper.lastModifiedMs("$dir/$fileName")
     }
 
+    // Reads the local save once and returns its MD5 (matching RomM's content_hash),
+    // size, and mtime — used to build a ClientSaveState for /api/sync/negotiate.
+    // Returns null if no save folder is configured or the file can't be read.
+    suspend fun localSaveStat(fileName: String, platformFsSlug: String?): LocalSaveStat? {
+        val dir = effectiveSaveDir(platformFsSlug) ?: return null
+        val path = "$dir/$fileName"
+        return withContext(Dispatchers.IO) {
+            try {
+                val bytes = rootHelper.readBytes(path)
+                LocalSaveStat(md5Hex(bytes), bytes.size.toLong(), rootHelper.lastModifiedMs(path))
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
     // Resolves which local filename to use for a save, given the ROM's filename and an optional
     // extension hint (from the server's filename). Preference order:
     //   1. Stable name `$romBase.$ext` if it exists.
@@ -121,7 +145,8 @@ class SaveRepository @Inject constructor(
         saveId: Int,
         fileName: String,
         platformFsSlug: String?,
-        remoteUpdatedAtMs: Long? = null
+        remoteUpdatedAtMs: Long? = null,
+        sessionId: Int? = null
     ) {
         val deviceId = getOrRegisterDeviceId()
         val dir = effectiveSaveDir(platformFsSlug)
@@ -130,7 +155,7 @@ class SaveRepository @Inject constructor(
 
         rootHelper.backupFile(destPath)
 
-        val response = api.downloadSave(saveId, deviceId)
+        val response = api.downloadSave(saveId, deviceId, sessionId)
         val body = response.body() ?: error("Empty save response from server")
 
         withContext(Dispatchers.IO) {
@@ -150,13 +175,18 @@ class SaveRepository @Inject constructor(
         romId: Int,
         slotKey: String,
         fileName: String,
-        platformFsSlug: String?
+        platformFsSlug: String?,
+        sessionId: Int? = null,
+        autocleanup: Boolean = true,
+        autocleanupLimit: Int = 10
     ): Long {
         val dir = effectiveSaveDir(platformFsSlug)
             ?: error("Save folder not configured — go to Settings")
         val bytes = rootHelper.readBytes("$dir/$fileName")
         val deviceId = getOrRegisterDeviceId()
-        val saved = uploadBytes(romId, slotKey, fileName, deviceId, bytes)
+        val saved = uploadBytes(
+            romId, slotKey, fileName, deviceId, bytes, sessionId, autocleanup, autocleanupLimit
+        )
         val serverMs = parseIsoToMs(saved.updatedAt) ?: System.currentTimeMillis()
         rootHelper.setLastModified("$dir/$fileName", serverMs)
         return serverMs
@@ -175,41 +205,74 @@ class SaveRepository @Inject constructor(
         return parseIsoToMs(saved.updatedAt) ?: System.currentTimeMillis()
     }
 
+    // Uploads via POST /api/saves. In RomM 4.9, slot uploads are datetime-tagged
+    // server-side into per-slot history; identical content (matching content_hash)
+    // is de-duplicated, and autocleanup trims the slot to the most recent N. The
+    // POST also records this device's sync state, so no separate "downloaded" call
+    // is needed. A 409 is surfaced as a SaveConflictException when parseable.
     private suspend fun uploadBytes(
         romId: Int,
         slotKey: String,
         fileName: String,
         deviceId: String,
-        data: ByteArray
+        data: ByteArray,
+        sessionId: Int? = null,
+        autocleanup: Boolean = true,
+        autocleanupLimit: Int = 10
     ): SaveResponse = withContext(Dispatchers.IO) {
         val tmp = File(context.cacheDir, "save_upload_$fileName")
         try {
             tmp.writeBytes(data)
             val requestFile = tmp.asRequestBody("application/octet-stream".toMediaTypeOrNull())
             val part = MultipartBody.Part.createFormData("saveFile", fileName, requestFile)
-            val existing = api.getSaves(romId = romId, deviceId = deviceId, slot = slotKey).firstOrNull()
-            val saved = try {
-                if (existing != null) {
-                    api.updateSave(existing.id, part)
-                } else {
-                    api.uploadSave(
-                        romId = romId,
-                        deviceId = deviceId,
-                        slot = slotKey,
-                        emulator = "caulker",
-                        overwrite = false,
-                        saveFile = part
-                    )
-                }
+            try {
+                api.uploadSave(
+                    romId = romId,
+                    deviceId = deviceId,
+                    slot = slotKey,
+                    emulator = "caulker",
+                    overwrite = false,
+                    sessionId = sessionId,
+                    autocleanup = autocleanup,
+                    autocleanupLimit = autocleanupLimit,
+                    saveFile = part
+                )
             } catch (e: HttpException) {
                 throw SaveConflictException.parse(e) ?: e
             }
-            api.markSaveDownloaded(saved.id, MarkDownloadedRequest(deviceId))
-            saved
         } finally {
             tmp.delete()
         }
     }
+
+    // --- Sync engine (RomM 4.9) ---
+
+    // Asks the server to compute per-save sync actions for this device given the
+    // client's current save state. Returns a session id + operations to execute.
+    suspend fun negotiate(deviceId: String, saves: List<ClientSaveState>): SyncNegotiateResponse =
+        api.negotiateSync(SyncNegotiateRequest(deviceId, saves))
+
+    // Marks a sync session complete.
+    suspend fun completeSession(
+        sessionId: Int,
+        operationsCompleted: Int,
+        operationsFailed: Int
+    ) {
+        api.completeSyncSession(
+            sessionId,
+            SyncCompleteRequest(
+                operationsCompleted = operationsCompleted,
+                operationsFailed = operationsFailed
+            )
+        )
+    }
+
+    // Re-enable / disable sync tracking for a specific save on this device.
+    suspend fun trackSave(saveId: Int, deviceId: String): SaveResponse =
+        api.trackSave(saveId, MarkDownloadedRequest(deviceId))
+
+    suspend fun untrackSave(saveId: Int, deviceId: String): SaveResponse =
+        api.untrackSave(saveId, MarkDownloadedRequest(deviceId))
 
     suspend fun getLocalFilePath(fileName: String, platformFsSlug: String?): String? {
         val dir = effectiveSaveDir(platformFsSlug) ?: return null

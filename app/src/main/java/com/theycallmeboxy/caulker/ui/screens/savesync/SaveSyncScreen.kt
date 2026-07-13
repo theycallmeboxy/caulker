@@ -170,7 +170,8 @@ fun SaveSyncScreen(
                         preferredSlotKey = preferredSlotKey,
                         onSmartSync = { viewModel.smartSync(activeSlot) },
                         onKeepLocal = { viewModel.keepLocal(activeSlot) },
-                        onKeepRemote = { viewModel.keepRemote(activeSlot) }
+                        onKeepRemote = { viewModel.keepRemote(activeSlot) },
+                        onToggleTrack = { viewModel.toggleTrack(activeSlot) }
                     )
                 }
 
@@ -226,7 +227,8 @@ private fun ActiveSlotSection(
     preferredSlotKey: String,
     onSmartSync: () -> Unit,
     onKeepLocal: () -> Unit,
-    onKeepRemote: () -> Unit
+    onKeepRemote: () -> Unit,
+    onToggleTrack: () -> Unit
 ) {
     val context = LocalContext.current
     val slot = state.slot
@@ -411,6 +413,30 @@ private fun ActiveSlotSection(
                         Text("Keep Remote")
                     }
                 }
+            }
+        }
+
+        // RomM 4.9: pause/resume sync for this save on this device. Only meaningful
+        // once the slot exists on the server.
+        if (state.saveId != null) {
+            if (state.isUntracked) {
+                Text(
+                    "Sync is paused for this slot on this device.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TextButton(
+                onClick = onToggleTrack,
+                enabled = !state.isSyncing
+            ) {
+                Icon(
+                    if (state.isUntracked) Icons.Default.Sync else Icons.Default.SyncDisabled,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(if (state.isUntracked) "Resume sync on this device" else "Pause sync on this device")
             }
         }
     }

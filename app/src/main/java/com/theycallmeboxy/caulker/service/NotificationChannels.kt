@@ -9,6 +9,9 @@ object NotificationChannels {
     const val SAVE_SYNC_ID = "save_sync"
     const val SAVE_SYNC_NOTIFICATION_ID = 1001
 
+    const val DOWNLOAD_ID = "collection_download"
+    const val DOWNLOAD_NOTIFICATION_ID = 1002
+
     fun ensureCreated(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
@@ -19,6 +22,17 @@ object NotificationChannels {
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Progress and result of syncing game saves with RomM."
+                setShowBadge(false)
+            }
+            manager.createNotificationChannel(channel)
+        }
+        if (manager.getNotificationChannel(DOWNLOAD_ID) == null) {
+            val channel = NotificationChannel(
+                DOWNLOAD_ID,
+                "Collection downloads",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Progress and result of downloading a collection's games."
                 setShowBadge(false)
             }
             manager.createNotificationChannel(channel)

@@ -43,6 +43,11 @@
             android:foregroundServiceType="dataSync" />
 
         <service
+            android:name=".service.CollectionDownloadForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
             android:name=".service.SaveSyncTileService"
             android:exported="true"
             android:icon="@android:drawable/stat_notify_sync"

@@ -27,6 +27,7 @@ data class SlotUiState(
     val message: String? = null,
     val isError: Boolean = false,
     val isPreferred: Boolean = false,
+    val isUntracked: Boolean = false,
     val backupInfo: BackupInfo? = null,
     val localFilePath: String? = null
 )
@@ -131,6 +132,7 @@ class SaveSyncViewModel @Inject constructor(
                         localModifiedMs = localMs,
                         syncAction = determineSyncAction(slotResponse, hasLocal, localMs, deviceSync),
                         isPreferred = slotKey == preferredSlot,
+                        isUntracked = deviceSync?.isUntracked ?: false,
                         backupInfo = saveRepository.getBackupInfo(localFileName, platformFsSlug),
                         localFilePath = saveRepository.getLocalFilePath(localFileName, platformFsSlug)
                     )
@@ -252,6 +254,35 @@ class SaveSyncViewModel @Inject constructor(
 
     fun keepLocal(state: SlotUiState) = uploadFromDisk(state)
     fun keepRemote(state: SlotUiState) = downloadSlot(state)
+
+    // RomM 4.9: pause/resume sync tracking for this save on this device. A paused
+    // (untracked) save is treated as no-op by the server's sync negotiation.
+    fun toggleTrack(state: SlotUiState) {
+        val saveId = state.saveId ?: return
+        val slotKey = state.slot.slotKey
+        viewModelScope.launch {
+            updateSlot(slotKey) { it.copy(isSyncing = true, message = null, isError = false) }
+            try {
+                val deviceId = saveRepository.getOrRegisterDeviceId()
+                val updated = if (state.isUntracked)
+                    saveRepository.trackSave(saveId, deviceId)
+                else
+                    saveRepository.untrackSave(saveId, deviceId)
+                val nowUntracked = updated.deviceSyncs
+                    .find { it.deviceId == deviceId }?.isUntracked ?: !state.isUntracked
+                updateSlot(slotKey) {
+                    it.copy(
+                        isSyncing = false,
+                        isUntracked = nowUntracked,
+                        message = if (nowUntracked) "Sync paused on this device" else "Sync resumed",
+                        isError = false
+                    )
+                }
+            } catch (e: Exception) {
+                updateSlot(slotKey) { it.copy(isSyncing = false, message = e.message, isError = true) }
+            }
+        }
+    }
 
     fun downloadSlot(state: SlotUiState) {
         val slotKey = state.slot.slotKey

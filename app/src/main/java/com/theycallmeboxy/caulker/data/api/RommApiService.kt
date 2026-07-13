@@ -36,6 +36,8 @@ interface RommApiService {
     suspend fun getRoms(
         @Query("platform_ids") platformId: Int? = null,
         @Query("collection_id") collectionId: Int? = null,
+        @Query("virtual_collection_id") virtualCollectionId: String? = null,
+        @Query("smart_collection_id") smartCollectionId: Int? = null,
         @Query("search") search: String? = null,
         @Query("offset") offset: Int = 0,
         @Query("limit") limit: Int = 50,
@@ -72,6 +74,16 @@ interface RommApiService {
     @GET("api/collections/identifiers")
     suspend fun getCollectionIdentifiers(): List<Int>
 
+    // `type` is required server-side (e.g. "genre", "franchise"); "all" returns
+    // every type. Omitting it returns HTTP 422.
+    @GET("api/collections/virtual")
+    suspend fun getVirtualCollections(
+        @Query("type") type: String = "all"
+    ): List<VirtualCollectionResponse>
+
+    @GET("api/collections/virtual/{id}")
+    suspend fun getVirtualCollection(@Path("id") id: String): VirtualCollectionResponse
+
     // --- Saves ---
 
     @GET("api/saves")
@@ -90,6 +102,7 @@ interface RommApiService {
     suspend fun downloadSave(
         @Path("id") id: Int,
         @Query("device_id") deviceId: String,
+        @Query("session_id") sessionId: Int? = null,
         @Query("optimistic") optimistic: Boolean = true
     ): Response<ResponseBody>
 
@@ -99,6 +112,18 @@ interface RommApiService {
         @Body request: MarkDownloadedRequest
     ): Response<Unit>
 
+    @POST("api/saves/{id}/track")
+    suspend fun trackSave(
+        @Path("id") id: Int,
+        @Body request: MarkDownloadedRequest
+    ): SaveResponse
+
+    @POST("api/saves/{id}/untrack")
+    suspend fun untrackSave(
+        @Path("id") id: Int,
+        @Body request: MarkDownloadedRequest
+    ): SaveResponse
+
     @Multipart
     @POST("api/saves")
     suspend fun uploadSave(
@@ -107,6 +132,9 @@ interface RommApiService {
         @Query("slot") slot: String,
         @Query("emulator") emulator: String? = null,
         @Query("overwrite") overwrite: Boolean = false,
+        @Query("session_id") sessionId: Int? = null,
+        @Query("autocleanup") autocleanup: Boolean = false,
+        @Query("autocleanup_limit") autocleanupLimit: Int = 10,
         @Part saveFile: MultipartBody.Part
     ): SaveResponse
 
@@ -116,6 +144,23 @@ interface RommApiService {
         @Path("id") id: Int,
         @Part saveFile: MultipartBody.Part
     ): SaveResponse
+
+    // --- Save sync engine (RomM 4.9) ---
+
+    @POST("api/sync/negotiate")
+    suspend fun negotiateSync(@Body request: SyncNegotiateRequest): SyncNegotiateResponse
+
+    @POST("api/sync/sessions/{id}/complete")
+    suspend fun completeSyncSession(
+        @Path("id") id: Int,
+        @Body request: SyncCompleteRequest
+    ): SyncCompleteResponse
+
+    @GET("api/sync/sessions")
+    suspend fun getSyncSessions(
+        @Query("device_id") deviceId: String? = null,
+        @Query("limit") limit: Int = 50
+    ): List<SyncSessionResponse>
 
     // --- Devices ---
 
