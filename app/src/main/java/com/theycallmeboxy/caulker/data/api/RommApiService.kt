@@ -95,9 +95,6 @@ interface RommApiService {
         @Query("slot") slot: String? = null
     ): List<SaveResponse>
 
-    @GET("api/saves/summary")
-    suspend fun getSaveSummary(@Query("rom_id") romId: Int): SaveSummaryResponse
-
     @GET("api/saves/{id}/content")
     suspend fun downloadSave(
         @Path("id") id: Int,

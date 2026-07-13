@@ -21,7 +21,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.theycallmeboxy.caulker.data.download.CollectionDownloadState
+import com.theycallmeboxy.caulker.data.download.BulkDownloadState
 import com.theycallmeboxy.caulker.ui.util.formatFileSize
 
 // A collection the user asked to download, held while the confirm dialog resolves
@@ -93,7 +93,7 @@ fun CollectionsScreen(
         },
         bottomBar = {
             val state = downloadState
-            if (state is CollectionDownloadState.Downloading) {
+            if (state is BulkDownloadState.Downloading) {
                 DownloadProgressBar(state, onCancel = viewModel::cancelDownload)
             }
         }
@@ -223,7 +223,7 @@ private fun DownloadConfirmDialog(
 
 @Composable
 private fun DownloadProgressBar(
-    state: CollectionDownloadState.Downloading,
+    state: BulkDownloadState.Downloading,
     onCancel: () -> Unit
 ) {
     val overall = if (state.total > 0) (state.done + state.currentFraction) / state.total else 0f
@@ -232,7 +232,7 @@ private fun DownloadProgressBar(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        state.collectionName,
+                        state.label,
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis

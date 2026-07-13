@@ -5,11 +5,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.theycallmeboxy.caulker.data.api.model.VirtualCollectionResponse
 import com.theycallmeboxy.caulker.data.db.entity.CollectionEntity
-import com.theycallmeboxy.caulker.data.download.CollectionDownloadOrchestrator
-import com.theycallmeboxy.caulker.data.download.CollectionDownloadState
+import com.theycallmeboxy.caulker.data.download.DownloadOrchestrator
+import com.theycallmeboxy.caulker.data.download.BulkDownloadState
 import com.theycallmeboxy.caulker.data.repository.CollectionRepository
 import com.theycallmeboxy.caulker.data.repository.RomRepository
-import com.theycallmeboxy.caulker.service.CollectionDownloadForegroundService
+import com.theycallmeboxy.caulker.service.DownloadForegroundService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,7 +39,7 @@ data class DownloadEstimate(
 class CollectionsViewModel @Inject constructor(
     repository: CollectionRepository,
     private val romRepository: RomRepository,
-    private val downloadOrchestrator: CollectionDownloadOrchestrator,
+    private val downloadOrchestrator: DownloadOrchestrator,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -61,7 +61,7 @@ class CollectionsViewModel @Inject constructor(
         all.filter { vc -> query.isBlank() || vc.name.contains(query, ignoreCase = true) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val downloadState: StateFlow<CollectionDownloadState> = downloadOrchestrator.state
+    val downloadState: StateFlow<BulkDownloadState> = downloadOrchestrator.state
 
     init {
         viewModelScope.launch {
@@ -95,7 +95,7 @@ class CollectionsViewModel @Inject constructor(
         downloadOrchestrator.download(name, romIds)
         // Foreground service keeps the process alive and shows a progress
         // notification with a cancel action while the app-scoped orchestrator runs.
-        CollectionDownloadForegroundService.start(context)
+        DownloadForegroundService.start(context)
     }
 
     fun cancelDownload() {

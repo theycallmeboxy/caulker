@@ -43,7 +43,7 @@
             android:foregroundServiceType="dataSync" />
 
         <service
-            android:name=".service.CollectionDownloadForegroundService"
+            android:name=".service.DownloadForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 

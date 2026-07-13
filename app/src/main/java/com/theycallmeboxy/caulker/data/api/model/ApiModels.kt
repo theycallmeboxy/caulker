@@ -140,20 +140,6 @@ data class SaveResponse(
     @Json(name = "device_syncs") val deviceSyncs: List<DeviceSaveSync> = emptyList()
 )
 
-// RomM 4.9 shape: { total_count, slots:[{slot, count, latest: SaveSchema}] }.
-@JsonClass(generateAdapter = true)
-data class SaveSummaryResponse(
-    @Json(name = "total_count") val totalCount: Int = 0,
-    val slots: List<SlotSummaryResponse> = emptyList()
-)
-
-@JsonClass(generateAdapter = true)
-data class SlotSummaryResponse(
-    val slot: String? = null,
-    val count: Int = 0,
-    val latest: SaveResponse? = null
-)
-
 @JsonClass(generateAdapter = true)
 data class SaveSlotResponse(
     val slot: String? = null,
@@ -199,7 +185,7 @@ data class FirmwareResponse(
     val id: Int,
     @Json(name = "platform_id") val platformId: Int? = null,
     @Json(name = "file_name") val fileName: String,
-    @Json(name = "file_size") val fileSize: Long = 0,
+    @Json(name = "file_size_bytes") val fileSize: Long = 0,
     val crc: String? = null,
     val md5: String? = null,
     val sha1: String? = null,

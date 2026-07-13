@@ -9,15 +9,28 @@ import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 // data layer so the orchestrator doesn't have to import upward into UI code.
 enum class SyncAction { NONE, UPLOAD, DOWNLOAD, UP_TO_DATE, CONFLICT }
 
+// Mirrors RomM 4.9's server-side compare_save_state (hash-first): identical
+// content is a no-op regardless of timestamps, then last-synced tracking decides
+// direction / conflict, then a timestamp fallback. Passing the local and server
+// `content_hash` keeps this in-app verdict aligned with the server's
+// /sync/negotiate result, so a byte-identical save is never flagged for
+// upload/download the way a timestamp-only comparison would.
 fun determineSyncAction(
     slot: SaveSlotResponse,
     hasLocalFile: Boolean,
     localModifiedMs: Long,
-    deviceSync: DeviceSaveSync? = null
+    deviceSync: DeviceSaveSync? = null,
+    localHash: String? = null,
+    remoteHash: String? = null
 ): SyncAction {
     if (!slot.hasRemote && !hasLocalFile) return SyncAction.NONE
     if (!slot.hasRemote) return SyncAction.UPLOAD
     if (!hasLocalFile) return SyncAction.DOWNLOAD
+
+    // Identical content -> already in sync, whatever the timestamps say.
+    if (localHash != null && remoteHash != null && localHash == remoteHash) {
+        return SyncAction.UP_TO_DATE
+    }
 
     val remoteMs = parseIsoToMs(slot.remoteUpdatedAt) ?: return SyncAction.UP_TO_DATE
 

@@ -113,10 +113,11 @@ class SaveSyncViewModel @Inject constructor(
                     val localFileName = saveRepository.resolveLocalSaveFileName(
                         save.fileName, romFileName, platformFsSlug
                     ) ?: save.fileName
-                    val hasLocal = saveRepository.hasLocalSave(localFileName, platformFsSlug)
-                    val localMs = if (hasLocal)
-                        saveRepository.localSaveModifiedMs(localFileName, platformFsSlug)
-                    else 0L
+                    // Read the local file's hash + mtime once so the decision can
+                    // short-circuit byte-identical content (matching the server).
+                    val stat = saveRepository.localSaveStat(localFileName, platformFsSlug)
+                    val hasLocal = stat != null
+                    val localMs = stat?.modifiedMs ?: 0L
                     val slotResponse = SaveSlotResponse(
                         slot = save.slot,
                         emulator = save.emulator,
@@ -130,7 +131,10 @@ class SaveSyncViewModel @Inject constructor(
                         saveId = save.id,
                         hasLocalFile = hasLocal,
                         localModifiedMs = localMs,
-                        syncAction = determineSyncAction(slotResponse, hasLocal, localMs, deviceSync),
+                        syncAction = determineSyncAction(
+                            slotResponse, hasLocal, localMs, deviceSync,
+                            localHash = stat?.contentHash, remoteHash = save.contentHash
+                        ),
                         isPreferred = slotKey == preferredSlot,
                         isUntracked = deviceSync?.isUntracked ?: false,
                         backupInfo = saveRepository.getBackupInfo(localFileName, platformFsSlug),

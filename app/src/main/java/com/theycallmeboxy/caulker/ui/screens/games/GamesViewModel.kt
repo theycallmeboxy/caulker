@@ -1,20 +1,29 @@
 package com.theycallmeboxy.caulker.ui.screens.games
 
+import android.content.Context
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.theycallmeboxy.caulker.data.db.entity.RomEntity
+import com.theycallmeboxy.caulker.data.download.BulkDownloadState
+import com.theycallmeboxy.caulker.data.download.DownloadOrchestrator
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import com.theycallmeboxy.caulker.data.repository.PlatformRepository
 import com.theycallmeboxy.caulker.data.repository.RomRepository
 import com.theycallmeboxy.caulker.data.sync.LibrarySyncManager
+import com.theycallmeboxy.caulker.service.DownloadForegroundService
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 enum class InstallFilter { ALL, INSTALLED, NOT_INSTALLED }
+
+// Result of estimating a bulk install: how many selected games aren't on-device
+// yet and their combined size, shown in the confirm dialog before downloading.
+data class BulkInstallEstimate(val missingCount: Int, val totalBytes: Long, val alreadyPresent: Int)
 
 @OptIn(FlowPreview::class)
 @HiltViewModel
@@ -23,7 +32,9 @@ class GamesViewModel @Inject constructor(
     private val repository: RomRepository,
     private val platformRepository: PlatformRepository,
     private val prefsStore: PrefsStore,
-    private val syncManager: LibrarySyncManager
+    private val syncManager: LibrarySyncManager,
+    private val downloadOrchestrator: DownloadOrchestrator,
+    @ApplicationContext private val context: Context
 ) : ViewModel() {
 
     private val platformId: Int = savedStateHandle.get<Int>("platformId") ?: -1
@@ -123,4 +134,80 @@ class GamesViewModel @Inject constructor(
     fun refreshInstalledStatusIfLoaded() {
         if (allRoms.value.isNotEmpty()) refreshInstalledStatus()
     }
+
+    // --- Multi-select bulk actions ---
+
+    private val _selectionMode = MutableStateFlow(false)
+    val selectionMode = _selectionMode.asStateFlow()
+
+    private val _selectedIds = MutableStateFlow<Set<Int>>(emptySet())
+    val selectedIds = _selectedIds.asStateFlow()
+
+    // App-scoped bulk download progress (shared with collections), surfaced so
+    // the games screen can show a progress bar after a bulk install starts.
+    val downloadState: StateFlow<BulkDownloadState> = downloadOrchestrator.state
+
+    fun enterSelection(romId: Int) {
+        _selectionMode.value = true
+        _selectedIds.value = setOf(romId)
+    }
+
+    fun exitSelection() {
+        _selectionMode.value = false
+        _selectedIds.value = emptySet()
+    }
+
+    fun toggleSelection(romId: Int) {
+        val cur = _selectedIds.value
+        _selectedIds.value = if (romId in cur) cur - romId else cur + romId
+    }
+
+    // "All" = every ROM on this platform; "Visible" = the current filtered/searched
+    // list; "None" = clear but stay in selection mode.
+    fun selectAll() { _selectedIds.value = allRoms.value.map { it.id }.toSet() }
+    fun selectVisible() { _selectedIds.value = roms.value.map { it.id }.toSet() }
+    fun selectNone() { _selectedIds.value = emptySet() }
+
+    // How much a bulk install of the current selection would actually fetch.
+    suspend fun estimateInstall(): BulkInstallEstimate {
+        val roms = _selectedIds.value.mapNotNull { repository.getById(it) }
+        val installed = repository.getInstalledRomIds(roms)
+        val missing = roms.filter { it.id !in installed }
+        return BulkInstallEstimate(
+            missingCount = missing.size,
+            totalBytes = missing.sumOf { it.fileSize },
+            alreadyPresent = roms.size - missing.size
+        )
+    }
+
+    fun installSelected() {
+        val ids = _selectedIds.value.toList()
+        if (ids.isEmpty() || downloadOrchestrator.isRunning()) return
+        downloadOrchestrator.download("Selected games", ids)
+        DownloadForegroundService.start(context)
+        exitSelection()
+    }
+
+    fun uninstallSelected() {
+        val ids = _selectedIds.value.toList()
+        exitSelection()
+        viewModelScope.launch {
+            ids.forEach { id -> repository.getById(id)?.let { repository.deleteLocalRom(it) } }
+            refreshInstalledStatus()
+        }
+    }
+
+    fun enrollSelected() {
+        val ids = _selectedIds.value.toList()
+        exitSelection()
+        viewModelScope.launch { ids.forEach { prefsStore.enrollInSaveSync(it) } }
+    }
+
+    fun unenrollSelected() {
+        val ids = _selectedIds.value.toList()
+        exitSelection()
+        viewModelScope.launch { ids.forEach { prefsStore.unenrollFromSaveSync(it) } }
+    }
+
+    fun cancelDownload() = downloadOrchestrator.cancel()
 }

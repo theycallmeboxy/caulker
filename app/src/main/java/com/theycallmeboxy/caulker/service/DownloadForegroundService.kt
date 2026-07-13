@@ -10,8 +10,8 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.theycallmeboxy.caulker.MainActivity
-import com.theycallmeboxy.caulker.data.download.CollectionDownloadOrchestrator
-import com.theycallmeboxy.caulker.data.download.CollectionDownloadState
+import com.theycallmeboxy.caulker.data.download.BulkDownloadState
+import com.theycallmeboxy.caulker.data.download.DownloadOrchestrator
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -20,15 +20,16 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-// Owns the progress notification while the orchestrator downloads a collection.
-// Unlike the save-sync service, it does not start the work — the ViewModel kicks
-// off the orchestrator (which needs the collection's ROM ids) and then starts
-// this service purely to keep the process alive and show progress. Stops itself
-// once the orchestrator returns to Idle/Done/Error.
+// Owns the progress notification while the orchestrator downloads a batch of
+// ROMs (a collection, or a multi-selection). Unlike the save-sync service, it
+// does not start the work — the ViewModel kicks off the orchestrator (which
+// needs the rom ids) and then starts this service purely to keep the process
+// alive and show progress. Stops itself once the orchestrator returns to
+// Idle/Done/Error.
 @AndroidEntryPoint
-class CollectionDownloadForegroundService : android.app.Service() {
+class DownloadForegroundService : android.app.Service() {
 
-    @Inject lateinit var orchestrator: CollectionDownloadOrchestrator
+    @Inject lateinit var orchestrator: DownloadOrchestrator
 
     private var scope: CoroutineScope? = null
     private var observerJob: Job? = null
@@ -43,7 +44,7 @@ class CollectionDownloadForegroundService : android.app.Service() {
         }
 
         NotificationChannels.ensureCreated(this)
-        startForegroundWithType(buildNotification(initial = true, title = "Downloading collection", label = "Preparing…"))
+        startForegroundWithType(buildNotification(initial = true, title = "Downloading games", label = "Preparing…"))
 
         val s = scope ?: MainScope().also { scope = it }
         observerJob?.cancel()
@@ -53,24 +54,24 @@ class CollectionDownloadForegroundService : android.app.Service() {
         return START_NOT_STICKY
     }
 
-    private fun handleState(state: CollectionDownloadState) {
+    private fun handleState(state: BulkDownloadState) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         when (state) {
-            is CollectionDownloadState.Downloading -> {
+            is BulkDownloadState.Downloading -> {
                 val label = "Downloading ${state.done + 1} of ${state.total}" +
                     (state.currentRomName?.let { " — $it" } ?: "")
                 nm.notify(
                     NotificationChannels.DOWNLOAD_NOTIFICATION_ID,
                     buildNotification(
                         initial = false,
-                        title = state.collectionName,
+                        title = state.label,
                         label = label,
                         progress = state.done,
                         max = state.total
                     )
                 )
             }
-            is CollectionDownloadState.Done -> {
+            is BulkDownloadState.Done -> {
                 val body = buildString {
                     append("Downloaded ${state.downloaded}")
                     if (state.skipped > 0) append(", ${state.skipped} already present")
@@ -78,18 +79,18 @@ class CollectionDownloadForegroundService : android.app.Service() {
                 }
                 nm.notify(
                     NotificationChannels.DOWNLOAD_NOTIFICATION_ID,
-                    buildFinalNotification(title = "${state.collectionName} downloaded", body = body)
+                    buildFinalNotification(title = "${state.label} downloaded", body = body)
                 )
                 stopAndCleanup()
             }
-            is CollectionDownloadState.Error -> {
+            is BulkDownloadState.Error -> {
                 nm.notify(
                     NotificationChannels.DOWNLOAD_NOTIFICATION_ID,
-                    buildFinalNotification(title = "Collection download failed", body = state.message)
+                    buildFinalNotification(title = "Download failed", body = state.message)
                 )
                 stopAndCleanup()
             }
-            CollectionDownloadState.Idle -> {
+            BulkDownloadState.Idle -> {
                 // StateFlow replays its current value on collection. Only stop once
                 // the orchestrator is genuinely idle (finished or cancelled), not
                 // in the brief window before it sets Downloading.
@@ -140,7 +141,7 @@ class CollectionDownloadForegroundService : android.app.Service() {
         )
         val cancelIntent = PendingIntent.getService(
             this, 1,
-            Intent(this, CollectionDownloadForegroundService::class.java).setAction(ACTION_CANCEL),
+            Intent(this, DownloadForegroundService::class.java).setAction(ACTION_CANCEL),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -180,10 +181,10 @@ class CollectionDownloadForegroundService : android.app.Service() {
     }
 
     companion object {
-        const val ACTION_CANCEL = "com.theycallmeboxy.caulker.COLLECTION_DOWNLOAD_CANCEL"
+        const val ACTION_CANCEL = "com.theycallmeboxy.caulker.DOWNLOAD_CANCEL"
 
         fun start(context: Context) {
-            val intent = Intent(context, CollectionDownloadForegroundService::class.java)
+            val intent = Intent(context, DownloadForegroundService::class.java)
             ContextCompat.startForegroundService(context, intent)
         }
     }

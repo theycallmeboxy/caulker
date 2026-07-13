@@ -135,10 +135,9 @@ class SaveSyncAllViewModel @Inject constructor(
                 val localFileName = saveRepository.resolveLocalSaveFileName(
                     save.fileName, romFileName, platformFsSlug
                 ) ?: save.fileName
-                val hasLocal = saveRepository.hasLocalSave(localFileName, platformFsSlug)
-                val localMs = if (hasLocal)
-                    saveRepository.localSaveModifiedMs(localFileName, platformFsSlug)
-                else 0L
+                val stat = saveRepository.localSaveStat(localFileName, platformFsSlug)
+                val hasLocal = stat != null
+                val localMs = stat?.modifiedMs ?: 0L
                 val slotResponse = SaveSlotResponse(
                     slot = save.slot,
                     emulator = save.emulator,
@@ -152,7 +151,10 @@ class SaveSyncAllViewModel @Inject constructor(
                     saveId = save.id,
                     hasLocalFile = hasLocal,
                     localModifiedMs = localMs,
-                    syncAction = determineSyncAction(slotResponse, hasLocal, localMs, deviceSync)
+                    syncAction = determineSyncAction(
+                        slotResponse, hasLocal, localMs, deviceSync,
+                        localHash = stat?.contentHash, remoteHash = save.contentHash
+                    )
                 )
             }
             RomSyncGroup(romId, rom.name, platformName, platformFsSlug, romFileName, slots)
