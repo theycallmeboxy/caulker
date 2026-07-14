@@ -39,7 +39,7 @@ class DownloadForegroundService : android.app.Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             orchestrator.cancel()
-            stopAndCleanup()
+            stopAndCleanup(removeNotification = true)
             return START_NOT_STICKY
         }
 
@@ -99,16 +99,18 @@ class DownloadForegroundService : android.app.Service() {
         }
     }
 
-    private fun stopAndCleanup() {
+    // removeNotification=true dismisses the notification (user tapped Cancel);
+    // false detaches it so a final "Done/Failed" notification stays in the shade.
+    private fun stopAndCleanup(removeNotification: Boolean = false) {
         observerJob?.cancel()
         observerJob = null
         scope?.cancel()
         scope = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_DETACH)
+            stopForeground(if (removeNotification) STOP_FOREGROUND_REMOVE else STOP_FOREGROUND_DETACH)
         } else {
             @Suppress("DEPRECATION")
-            stopForeground(false)
+            stopForeground(removeNotification)
         }
         stopSelf()
     }

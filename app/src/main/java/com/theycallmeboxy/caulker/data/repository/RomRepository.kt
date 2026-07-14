@@ -15,6 +15,7 @@ import com.theycallmeboxy.caulker.data.prefs.PlatformOverrideMode
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -23,6 +24,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.coroutineContext
 
 private const val ROM_PAGE_SIZE = 500
 
@@ -305,6 +307,13 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
         val perFileTotal = body.contentLength().takeIf { it > 0 } ?: contentLength
         val total = if (progressTotalBytes > 0) progressTotalBytes else perFileTotal
         var bytesRead = 0L
+        // A stalled socket read blocks the IO thread and can't be interrupted by
+        // cooperative coroutine cancellation — so a hung download would ignore
+        // "Cancel" until the 120s read timeout. Closing the response body from the
+        // cancellation callback makes the blocking read() throw at once.
+        val cancelHandle = coroutineContext[Job]?.invokeOnCompletion {
+            try { body.close() } catch (_: Throwable) {}
+        }
         try {
             body.byteStream().use { input ->
                 destFile.outputStream().use { output ->
@@ -321,6 +330,8 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
             destFile.delete()
             emitter.emit(DownloadProgress.Failed("${e.javaClass.simpleName}: ${e.message ?: "unknown"} — path: ${destFile.absolutePath}"))
             return false
+        } finally {
+            cancelHandle?.dispose()
         }
         return true
     }
@@ -427,6 +438,11 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
 
         val totalBytes = body.contentLength()
         var bytesRead = 0L
+        // Close the body on cancellation so a stalled blocking read() aborts at
+        // once instead of hanging until the read timeout (see downloadSingleFile).
+        val cancelHandle = coroutineContext[Job]?.invokeOnCompletion {
+            try { body.close() } catch (_: Throwable) {}
+        }
         try {
             body.byteStream().use { input ->
                 destFile.outputStream().use { output ->
@@ -443,6 +459,8 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
             destFile.delete()
             emit(DownloadProgress.Failed("${e.javaClass.simpleName}: ${e.message ?: "unknown"} — path: ${destFile.absolutePath}"))
             return@flow
+        } finally {
+            cancelHandle?.dispose()
         }
 
         emit(DownloadProgress.Done(destFile))

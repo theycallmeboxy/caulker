@@ -16,6 +16,9 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+// One sync status for one ROM. Caulker holds exactly one local save file per ROM,
+// so the whole screen is a single relationship (this device's file <-> RomM),
+// synced to one server slot ("default" unless the user set an advanced override).
 data class SlotUiState(
     val slot: SaveSlotResponse,
     val fileName: String? = null,
@@ -26,7 +29,6 @@ data class SlotUiState(
     val isSyncing: Boolean = false,
     val message: String? = null,
     val isError: Boolean = false,
-    val isPreferred: Boolean = false,
     val isUntracked: Boolean = false,
     val backupInfo: BackupInfo? = null,
     val localFilePath: String? = null
@@ -44,31 +46,24 @@ class SaveSyncViewModel @Inject constructor(
     private var platformFsSlug: String? = null
     private var romFileName: String? = null
 
-    private val _allSlots = MutableStateFlow<List<SlotUiState>>(emptyList())
-
     private val _romName = MutableStateFlow("")
     val romName = _romName.asStateFlow()
 
-    val preferredSlotKey: StateFlow<String> = prefsStore.saveSyncSlotPref(romId)
+    // The server slot this device's local save maps to. "default" unless the user
+    // picked a specific slot via the advanced override.
+    val targetSlot: StateFlow<String> = prefsStore.saveSyncSlotPref(romId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "default")
 
     val isSaveSyncEnrolled: StateFlow<Boolean> = prefsStore.saveSyncEnrolled
         .map { it.contains(romId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
-    val visibleSlotKeys: StateFlow<Set<String>> = prefsStore.visibleSaveSlots(romId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
-
-    // Only expose slots the user has made visible, plus always the preferred slot.
-    val slots: StateFlow<List<SlotUiState>> = combine(
-        _allSlots, visibleSlotKeys, preferredSlotKey
-    ) { all, visible, preferred ->
-        all.filter { it.slot.slotKey == preferred || it.slot.slotKey in visible }
-            .sortedByDescending { it.isPreferred }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
+    // Slots that already exist on the server — offered in the advanced picker.
     private val _serverSlots = MutableStateFlow<List<String>>(emptyList())
     val serverSlots: StateFlow<List<String>> = _serverSlots.asStateFlow()
+
+    private val _status = MutableStateFlow<SlotUiState?>(null)
+    val status: StateFlow<SlotUiState?> = _status.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading = _isLoading.asStateFlow()
@@ -82,79 +77,61 @@ class SaveSyncViewModel @Inject constructor(
             platformFsSlug = rom?.platformFsSlug
             romFileName = rom?.fileName
             _romName.value = rom?.name ?: ""
-            loadSummary()
-        }
-        viewModelScope.launch {
-            prefsStore.saveSyncSlotPref(romId).collect { pref ->
-                _allSlots.value = _allSlots.value
-                    .map { it.copy(isPreferred = it.slot.slotKey == pref) }
-            }
+            loadStatus()
         }
     }
 
-    fun loadSummary() {
+    fun loadStatus() {
         viewModelScope.launch {
             _isLoading.value = true
             _error.value = null
             try {
                 val deviceId = saveRepository.getOrRegisterDeviceId()
-                val preferredSlot = prefsStore.saveSyncSlotPref(romId).first()
-                val visibleSlots = prefsStore.visibleSaveSlots(romId).first()
+                val target = prefsStore.saveSyncSlotPref(romId).first()
 
                 val saves = saveRepository.syncSavesForRom(romId)
-                    .groupBy { it.slot?.takeIf { s -> s.isNotBlank() } ?: "default" }
-                    .values
-                    .map { group -> group.maxByOrNull { it.updatedAt ?: "" }!! }
+                _serverSlots.value = saves
+                    .map { it.slot?.takeIf { s -> s.isNotBlank() } ?: "default" }
+                    .distinct()
+                    .sorted()
 
-                val serverSlotKeys = saves.map { it.slot?.takeIf { s -> s.isNotBlank() } ?: "default" }.toSet()
+                // The server save for the targeted slot (newest wins if duplicated).
+                val save = saves
+                    .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == target }
+                    .maxByOrNull { it.updatedAt ?: "" }
 
-                val serverStates = saves.map { save ->
-                    val slotKey = save.slot?.takeIf { it.isNotBlank() } ?: "default"
-                    val localFileName = saveRepository.resolveLocalSaveFileName(
-                        save.fileName, romFileName, platformFsSlug
-                    ) ?: save.fileName
-                    // Read the local file's hash + mtime once so the decision can
-                    // short-circuit byte-identical content (matching the server).
-                    val stat = saveRepository.localSaveStat(localFileName, platformFsSlug)
-                    val hasLocal = stat != null
-                    val localMs = stat?.modifiedMs ?: 0L
-                    val slotResponse = SaveSlotResponse(
-                        slot = save.slot,
-                        emulator = save.emulator,
-                        hasRemote = true,
-                        remoteUpdatedAt = save.updatedAt
-                    )
-                    val deviceSync = save.deviceSyncs.find { it.deviceId == deviceId }
-                    SlotUiState(
-                        slot = slotResponse,
-                        fileName = localFileName,
-                        saveId = save.id,
-                        hasLocalFile = hasLocal,
-                        localModifiedMs = localMs,
-                        syncAction = determineSyncAction(
-                            slotResponse, hasLocal, localMs, deviceSync,
-                            localHash = stat?.contentHash, remoteHash = save.contentHash
-                        ),
-                        isPreferred = slotKey == preferredSlot,
-                        isUntracked = deviceSync?.isUntracked ?: false,
-                        backupInfo = saveRepository.getBackupInfo(localFileName, platformFsSlug),
-                        localFilePath = saveRepository.getLocalFilePath(localFileName, platformFsSlug)
-                    )
-                }
+                // The single physical local file for this ROM. Resolve from the
+                // server filename when we have one, else scan the save dir by ROM base.
+                val localFileName = saveRepository.resolveLocalSaveFileName(
+                    save?.fileName, romFileName, platformFsSlug
+                ) ?: save?.fileName
+                // Read the local file's hash + mtime once so the decision can
+                // short-circuit byte-identical content (matching the server).
+                val stat = localFileName?.let { saveRepository.localSaveStat(it, platformFsSlug) }
+                val hasLocal = stat != null
+                val localMs = stat?.modifiedMs ?: 0L
 
-                // Synthesize states for visible + preferred slots not yet on the server.
-                // All slots on this ROM share the same physical local file, so reuse a
-                // resolved server filename when available; otherwise scan the save dir for
-                // a file matching the ROM base (handles fresh enrollment with no server saves).
-                val refFileName = serverStates.firstOrNull { it.hasLocalFile }?.fileName
-                    ?: serverStates.firstOrNull()?.fileName
-                    ?: saveRepository.resolveLocalSaveFileName(null, romFileName, platformFsSlug)
-                val toSynthesize = (visibleSlots + preferredSlot) - serverSlotKeys
-                val synthStates = toSynthesize.map { slotKey ->
-                    buildSynthesizedSlot(slotKey, preferredSlot, refFileName)
-                }
-
-                _allSlots.value = serverStates + synthStates
+                val slotResponse = SaveSlotResponse(
+                    slot = save?.slot ?: target.takeIf { it != "default" },
+                    emulator = save?.emulator,
+                    hasRemote = save != null,
+                    remoteUpdatedAt = save?.updatedAt
+                )
+                val deviceSync = save?.deviceSyncs?.find { it.deviceId == deviceId }
+                _status.value = SlotUiState(
+                    slot = slotResponse,
+                    fileName = localFileName,
+                    saveId = save?.id,
+                    hasLocalFile = hasLocal,
+                    localModifiedMs = localMs,
+                    syncAction = determineSyncAction(
+                        slotResponse, hasLocal, localMs, deviceSync,
+                        localHash = stat?.contentHash, remoteHash = save?.contentHash
+                    ),
+                    isUntracked = deviceSync?.isUntracked ?: false,
+                    backupInfo = localFileName?.let { saveRepository.getBackupInfo(it, platformFsSlug) },
+                    localFilePath = localFileName?.let { saveRepository.getLocalFilePath(it, platformFsSlug) }
+                )
             } catch (e: Exception) {
                 _error.value = e.message
             } finally {
@@ -163,109 +140,50 @@ class SaveSyncViewModel @Inject constructor(
         }
     }
 
-    fun setPreferredSlot(state: SlotUiState) {
-        viewModelScope.launch {
-            prefsStore.setSaveSyncSlotPref(romId, state.slot.slotKey)
-            _allSlots.value = _allSlots.value.map { it.copy(isPreferred = it.slot.slotKey == state.slot.slotKey) }
-        }
-    }
-
-    fun loadServerSlots() {
-        viewModelScope.launch {
-            try {
-                val saves = saveRepository.syncSavesForRom(romId)
-                _serverSlots.value = saves
-                    .map { it.slot?.takeIf { s -> s.isNotBlank() } ?: "default" }
-                    .distinct()
-                    .sorted()
-            } catch (_: Exception) {
-                _serverSlots.value = emptyList()
-            }
-        }
-    }
-
-    fun enrollInSaveSync(slotKey: String) {
+    fun enrollInSaveSync(slotKey: String = "default") {
         viewModelScope.launch {
             val key = slotKey.trim().ifBlank { "default" }
             prefsStore.setSaveSyncSlotPref(romId, key)
-            prefsStore.addVisibleSaveSlot(romId, key)
             prefsStore.enrollInSaveSync(romId)
-            loadSummary()
-        }
-    }
-
-    fun addSlot(slotKey: String) {
-        val key = slotKey.trim().ifBlank { "default" }
-        viewModelScope.launch {
-            prefsStore.addVisibleSaveSlot(romId, key)
-            // Synthesize a local state if this slot isn't already loaded from the server.
-            if (_allSlots.value.none { it.slot.slotKey == key }) {
-                val refFileName = _allSlots.value.firstOrNull { it.hasLocalFile }?.fileName
-                    ?: _allSlots.value.firstOrNull()?.fileName
-                    ?: saveRepository.resolveLocalSaveFileName(null, romFileName, platformFsSlug)
-                _allSlots.value = _allSlots.value + buildSynthesizedSlot(key, preferredSlotKey.value, refFileName)
-            }
-        }
-    }
-
-    private suspend fun buildSynthesizedSlot(
-        slotKey: String,
-        preferredSlot: String,
-        refFileName: String?
-    ): SlotUiState {
-        val hasLocal = refFileName?.let { saveRepository.hasLocalSave(it, platformFsSlug) } ?: false
-        val localMs = refFileName
-            ?.takeIf { hasLocal }
-            ?.let { saveRepository.localSaveModifiedMs(it, platformFsSlug) }
-            ?: 0L
-        val synthSlot = SaveSlotResponse(slot = slotKey, hasRemote = false)
-        return SlotUiState(
-            slot = synthSlot,
-            fileName = refFileName,
-            hasLocalFile = hasLocal,
-            localModifiedMs = localMs,
-            syncAction = determineSyncAction(synthSlot, hasLocal, localMs, null),
-            isPreferred = slotKey == preferredSlot,
-            backupInfo = refFileName?.let { saveRepository.getBackupInfo(it, platformFsSlug) },
-            localFilePath = refFileName?.let { saveRepository.getLocalFilePath(it, platformFsSlug) }
-        )
-    }
-
-    fun removeSlot(slotKey: String) {
-        if (slotKey == preferredSlotKey.value) return
-        viewModelScope.launch {
-            prefsStore.removeVisibleSaveSlot(romId, slotKey)
+            loadStatus()
         }
     }
 
     fun unenrollFromSaveSync() {
         viewModelScope.launch {
             prefsStore.unenrollFromSaveSync(romId)
-            prefsStore.clearVisibleSaveSlots(romId)
-            _allSlots.value = emptyList()
-            _serverSlots.value = emptyList()
+            _status.value = null
             _error.value = null
         }
     }
 
-    fun smartSync(state: SlotUiState) {
+    // Advanced override: point this ROM's local save at a different server slot.
+    fun setTargetSlot(slotKey: String) {
+        viewModelScope.launch {
+            prefsStore.setSaveSyncSlotPref(romId, slotKey.trim().ifBlank { "default" })
+            loadStatus()
+        }
+    }
+
+    fun smartSync() {
+        val state = _status.value ?: return
         when (state.syncAction) {
-            SyncAction.DOWNLOAD -> downloadSlot(state)
-            SyncAction.UPLOAD -> uploadFromDisk(state)
+            SyncAction.DOWNLOAD -> download(state)
+            SyncAction.UPLOAD -> upload(state)
             else -> {}
         }
     }
 
-    fun keepLocal(state: SlotUiState) = uploadFromDisk(state)
-    fun keepRemote(state: SlotUiState) = downloadSlot(state)
+    fun keepLocal() { _status.value?.let { upload(it) } }
+    fun keepRemote() { _status.value?.let { download(it) } }
 
     // RomM 4.9: pause/resume sync tracking for this save on this device. A paused
     // (untracked) save is treated as no-op by the server's sync negotiation.
-    fun toggleTrack(state: SlotUiState) {
+    fun toggleTrack() {
+        val state = _status.value ?: return
         val saveId = state.saveId ?: return
-        val slotKey = state.slot.slotKey
         viewModelScope.launch {
-            updateSlot(slotKey) { it.copy(isSyncing = true, message = null, isError = false) }
+            setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
                 val deviceId = saveRepository.getOrRegisterDeviceId()
                 val updated = if (state.isUntracked)
@@ -274,7 +192,7 @@ class SaveSyncViewModel @Inject constructor(
                     saveRepository.untrackSave(saveId, deviceId)
                 val nowUntracked = updated.deviceSyncs
                     .find { it.deviceId == deviceId }?.isUntracked ?: !state.isUntracked
-                updateSlot(slotKey) {
+                setStatus {
                     it.copy(
                         isSyncing = false,
                         isUntracked = nowUntracked,
@@ -283,15 +201,15 @@ class SaveSyncViewModel @Inject constructor(
                     )
                 }
             } catch (e: Exception) {
-                updateSlot(slotKey) { it.copy(isSyncing = false, message = e.message, isError = true) }
+                setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
             }
         }
     }
 
-    fun downloadSlot(state: SlotUiState) {
+    private fun download(state: SlotUiState) {
         val slotKey = state.slot.slotKey
         viewModelScope.launch {
-            updateSlot(slotKey) { it.copy(isSyncing = true, message = null, isError = false) }
+            setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
                 val save = saveRepository.syncSavesForRom(romId)
                     .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == slotKey }
@@ -304,7 +222,7 @@ class SaveSyncViewModel @Inject constructor(
                 saveRepository.downloadSave(save.id, localFileName, platformFsSlug, remoteMs)
                 val newLocalMs = saveRepository.localSaveModifiedMs(localFileName, platformFsSlug)
                 val newLocalPath = saveRepository.getLocalFilePath(localFileName, platformFsSlug)
-                updateSlot(slotKey) {
+                setStatus {
                     it.copy(
                         isSyncing = false,
                         hasLocalFile = true,
@@ -317,22 +235,22 @@ class SaveSyncViewModel @Inject constructor(
                     )
                 }
             } catch (e: Exception) {
-                updateSlot(slotKey) { it.copy(isSyncing = false, message = e.message, isError = true) }
+                setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
             }
         }
     }
 
-    fun uploadFromDisk(state: SlotUiState) {
+    private fun upload(state: SlotUiState) {
         val slotKey = state.slot.slotKey
         val fileName = state.fileName ?: run {
-            updateSlot(slotKey) { it.copy(message = "No save file found — make sure your save folder is configured correctly", isError = true) }
+            setStatus { it.copy(message = "No save file found — make sure your save folder is configured correctly", isError = true) }
             return
         }
         viewModelScope.launch {
-            updateSlot(slotKey) { it.copy(isSyncing = true, message = null, isError = false) }
+            setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
                 val serverMs = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug)
-                updateSlot(slotKey) {
+                setStatus {
                     it.copy(
                         isSyncing = false,
                         hasLocalFile = true,
@@ -347,12 +265,12 @@ class SaveSyncViewModel @Inject constructor(
                     )
                 }
             } catch (e: Exception) {
-                updateSlot(slotKey) { it.copy(isSyncing = false, message = e.message, isError = true) }
+                setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
             }
         }
     }
 
-    private fun updateSlot(slotKey: String, transform: (SlotUiState) -> SlotUiState) {
-        _allSlots.value = _allSlots.value.map { if (it.slot.slotKey == slotKey) transform(it) else it }
+    private fun setStatus(transform: (SlotUiState) -> SlotUiState) {
+        _status.value = _status.value?.let(transform)
     }
 }

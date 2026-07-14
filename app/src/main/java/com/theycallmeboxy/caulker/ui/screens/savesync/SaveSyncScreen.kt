@@ -32,45 +32,26 @@ fun SaveSyncScreen(
     onBack: () -> Unit,
     viewModel: SaveSyncViewModel = hiltViewModel()
 ) {
-    val context = LocalContext.current
-    val slots by viewModel.slots.collectAsState()
+    val status by viewModel.status.collectAsState()
     val romName by viewModel.romName.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val error by viewModel.error.collectAsState()
-    val preferredSlotKey by viewModel.preferredSlotKey.collectAsState()
+    val targetSlot by viewModel.targetSlot.collectAsState()
     val isSaveSyncEnrolled by viewModel.isSaveSyncEnrolled.collectAsState()
     val serverSlots by viewModel.serverSlots.collectAsState()
-    val visibleSlotKeys by viewModel.visibleSlotKeys.collectAsState()
 
-    val activeSlot = slots.firstOrNull { it.isPreferred } ?: slots.firstOrNull()
-    val otherSlots = slots.filter { !it.isPreferred }
+    var showSlotDialog by remember { mutableStateOf(false) }
 
-    var showEnrollDialog by remember { mutableStateOf(false) }
-    var showAddSlotDialog by remember { mutableStateOf(false) }
-
-    if (showEnrollDialog) {
+    if (showSlotDialog) {
         SlotDialog(
-            title = "Choose a save slot",
-            confirmText = "Enable",
+            title = "Sync target slot",
+            confirmText = "Use slot",
             existingSlots = serverSlots,
             onConfirm = { slotKey ->
-                showEnrollDialog = false
-                viewModel.enrollInSaveSync(slotKey)
+                showSlotDialog = false
+                viewModel.setTargetSlot(slotKey)
             },
-            onDismiss = { showEnrollDialog = false }
-        )
-    }
-
-    if (showAddSlotDialog) {
-        SlotDialog(
-            title = "Add a slot",
-            confirmText = "Add",
-            existingSlots = serverSlots.filter { it !in visibleSlotKeys },
-            onConfirm = { slotKey ->
-                showAddSlotDialog = false
-                viewModel.addSlot(slotKey)
-            },
-            onDismiss = { showAddSlotDialog = false }
+            onDismiss = { showSlotDialog = false }
         )
     }
 
@@ -96,12 +77,6 @@ fun SaveSyncScreen(
                 },
                 actions = {
                     if (isSaveSyncEnrolled) {
-                        IconButton(onClick = {
-                            viewModel.loadServerSlots()
-                            showAddSlotDialog = true
-                        }) {
-                            Icon(Icons.Default.Add, contentDescription = "Add slot")
-                        }
                         IconButton(onClick = { viewModel.unenrollFromSaveSync() }) {
                             Icon(Icons.Default.SyncDisabled, contentDescription = "Disable Save Sync")
                         }
@@ -130,28 +105,25 @@ fun SaveSyncScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Button(onClick = {
-                        viewModel.loadServerSlots()
-                        showEnrollDialog = true
-                    }) {
+                    Button(onClick = { viewModel.enrollInSaveSync() }) {
                         Text("Enable Save Sync")
                     }
                 }
             }
 
-            isLoading && slots.isEmpty() -> Box(
+            isLoading && status == null -> Box(
                 Modifier.fillMaxSize().padding(padding),
                 contentAlignment = Alignment.Center
             ) { CircularProgressIndicator() }
 
-            error != null && slots.isEmpty() -> Box(
+            error != null && status == null -> Box(
                 Modifier.fillMaxSize().padding(padding),
                 contentAlignment = Alignment.Center
             ) {
                 Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
             }
 
-            activeSlot == null && !isLoading -> Box(
+            status == null -> Box(
                 Modifier.fillMaxSize().padding(padding),
                 contentAlignment = Alignment.Center
             ) {
@@ -164,67 +136,36 @@ fun SaveSyncScreen(
                     .padding(padding)
                     .verticalScroll(rememberScrollState())
             ) {
-                if (activeSlot != null) {
-                    ActiveSlotSection(
-                        state = activeSlot,
-                        preferredSlotKey = preferredSlotKey,
-                        onSmartSync = { viewModel.smartSync(activeSlot) },
-                        onKeepLocal = { viewModel.keepLocal(activeSlot) },
-                        onKeepRemote = { viewModel.keepRemote(activeSlot) },
-                        onToggleTrack = { viewModel.toggleTrack(activeSlot) }
-                    )
-                }
+                SaveStatusSection(
+                    state = status!!,
+                    onSmartSync = viewModel::smartSync,
+                    onKeepLocal = viewModel::keepLocal,
+                    onKeepRemote = viewModel::keepRemote,
+                    onToggleTrack = viewModel::toggleTrack
+                )
 
-                if (otherSlots.isNotEmpty()) {
-                    HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
-                    Text(
-                        "Other slots",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                    )
-                    otherSlots.forEach { state ->
-                        ListItem(
-                            headlineContent = {
-                                Text(
-                                    state.slot.slotDisplay,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            },
-                            trailingContent = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    TextButton(onClick = { viewModel.setPreferredSlot(state) }) {
-                                        Text("Use this slot")
-                                    }
-                                    IconButton(
-                                        onClick = { viewModel.removeSlot(state.slot.slotKey) },
-                                        modifier = Modifier.size(36.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Close,
-                                            contentDescription = "Remove slot",
-                                            modifier = Modifier.size(18.dp),
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
+                HorizontalDivider()
+                ListItem(
+                    headlineContent = { Text("Sync target slot") },
+                    supportingContent = {
+                        Text(
+                            if (targetSlot == "default") "Default slot" else targetSlot,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                    },
+                    trailingContent = {
+                        TextButton(onClick = { showSlotDialog = true }) { Text("Change") }
                     }
-                }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ActiveSlotSection(
+private fun SaveStatusSection(
     state: SlotUiState,
-    preferredSlotKey: String,
     onSmartSync: () -> Unit,
     onKeepLocal: () -> Unit,
     onKeepRemote: () -> Unit,
@@ -243,12 +184,11 @@ private fun ActiveSlotSection(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    "Slot: $preferredSlotKey",
-                    style = MaterialTheme.typography.titleMedium
-                )
-            }
+            Text(
+                "This device ↔ RomM",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f)
+            )
             if (state.isSyncing) {
                 CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
             } else {
@@ -417,11 +357,11 @@ private fun ActiveSlotSection(
         }
 
         // RomM 4.9: pause/resume sync for this save on this device. Only meaningful
-        // once the slot exists on the server.
+        // once the save exists on the server.
         if (state.saveId != null) {
             if (state.isUntracked) {
                 Text(
-                    "Sync is paused for this slot on this device.",
+                    "Sync is paused for this game on this device.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -492,7 +432,6 @@ private fun SlotDialog(
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val dropdownOptions = existingSlots + NEW_SLOT_SENTINEL
     var expanded by remember { mutableStateOf(false) }
     var selected by remember(existingSlots) {
         mutableStateOf(existingSlots.firstOrNull() ?: NEW_SLOT_SENTINEL)

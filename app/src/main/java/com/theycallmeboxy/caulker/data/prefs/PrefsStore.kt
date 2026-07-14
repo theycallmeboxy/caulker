@@ -44,7 +44,6 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
         val PLATFORM_OVERRIDES = stringPreferencesKey("platform_overrides")
         val SAVE_SYNC_ENROLLED = stringPreferencesKey("save_sync_enrolled")
         val SAVE_SYNC_SLOT_PREFS = stringPreferencesKey("save_sync_slot_prefs")
-        val VISIBLE_SAVE_SLOTS = stringPreferencesKey("visible_save_slots")
         val INSECURE_SKIP_VERIFY = booleanPreferencesKey("insecure_skip_verify")
         val GLOBAL_ROM_SYNC_TIME = longPreferencesKey("global_rom_sync_time")
     }
@@ -142,43 +141,6 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
             obj.put(romId.toString(), slotKey)
             prefs[Keys.SAVE_SYNC_SLOT_PREFS] = obj.toString()
         }
-    }
-
-    fun visibleSaveSlots(romId: Int): Flow<Set<String>> = context.dataStore.data.map { prefs ->
-        prefs[Keys.VISIBLE_SAVE_SLOTS]?.let { json ->
-            try {
-                val arr = JSONObject(json).optJSONArray(romId.toString()) ?: return@let emptySet()
-                (0 until arr.length()).map { arr.getString(it) }.toSet()
-            } catch (_: Exception) { emptySet() }
-        } ?: emptySet()
-    }
-
-    suspend fun addVisibleSaveSlot(romId: Int, slotKey: String) = context.dataStore.edit { prefs ->
-        val root = try { prefs[Keys.VISIBLE_SAVE_SLOTS]?.let { JSONObject(it) } ?: JSONObject() }
-                   catch (_: Exception) { JSONObject() }
-        val arr = root.optJSONArray(romId.toString()) ?: JSONArray()
-        val current = (0 until arr.length()).map { arr.getString(it) }.toMutableSet()
-        if (current.add(slotKey)) {
-            val newArr = JSONArray().also { a -> current.forEach { a.put(it) } }
-            root.put(romId.toString(), newArr)
-            prefs[Keys.VISIBLE_SAVE_SLOTS] = root.toString()
-        }
-    }
-
-    suspend fun removeVisibleSaveSlot(romId: Int, slotKey: String) = context.dataStore.edit { prefs ->
-        val root = try { prefs[Keys.VISIBLE_SAVE_SLOTS]?.let { JSONObject(it) } ?: JSONObject() }
-                   catch (_: Exception) { JSONObject() }
-        val arr = root.optJSONArray(romId.toString()) ?: return@edit
-        val updated = (0 until arr.length()).map { arr.getString(it) }.filter { it != slotKey }
-        root.put(romId.toString(), JSONArray().also { a -> updated.forEach { a.put(it) } })
-        prefs[Keys.VISIBLE_SAVE_SLOTS] = root.toString()
-    }
-
-    suspend fun clearVisibleSaveSlots(romId: Int) = context.dataStore.edit { prefs ->
-        val root = try { prefs[Keys.VISIBLE_SAVE_SLOTS]?.let { JSONObject(it) } ?: JSONObject() }
-                   catch (_: Exception) { JSONObject() }
-        root.remove(romId.toString())
-        prefs[Keys.VISIBLE_SAVE_SLOTS] = root.toString()
     }
 
     // Cursor for the global incremental ROM sweep (updated_after). 0 = never synced.

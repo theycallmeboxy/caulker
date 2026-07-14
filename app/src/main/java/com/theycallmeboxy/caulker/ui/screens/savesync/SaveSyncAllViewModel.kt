@@ -30,7 +30,8 @@ data class RomSyncGroup(
     val platformName: String?,
     val platformFsSlug: String?,
     val romFileName: String?,
-    val slots: List<SlotUiState>
+    // One status per ROM — its single local save vs. the targeted server slot.
+    val status: SlotUiState
 )
 
 @HiltViewModel
@@ -52,7 +53,7 @@ class SaveSyncAllViewModel @Inject constructor(
     val error = _error.asStateFlow()
 
     val hasPendingChanges: StateFlow<Boolean> = _groups.map { groups ->
-        groups.any { g -> g.slots.any { it.syncAction == SyncAction.UPLOAD || it.syncAction == SyncAction.DOWNLOAD } }
+        groups.any { it.status.syncAction == SyncAction.UPLOAD || it.status.syncAction == SyncAction.DOWNLOAD }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // Bridge the orchestrator's current-rom signal into the per-row UI: when the
@@ -126,38 +127,38 @@ class SaveSyncAllViewModel @Inject constructor(
         val platformFsSlug = rom.platformFsSlug
         val romFileName = rom.fileName
         return try {
-            val saves = saveRepository.syncSavesForRom(romId)
-                .groupBy { it.slot?.takeIf { s -> s.isNotBlank() } ?: "default" }
-                .values
-                .map { group -> group.maxByOrNull { it.updatedAt ?: "" }!! }
-                .sortedWith(compareBy({ it.slot != null && it.slot != "default" && it.slot != "0" }, { it.slot }))
-            val slots = saves.map { save ->
-                val localFileName = saveRepository.resolveLocalSaveFileName(
-                    save.fileName, romFileName, platformFsSlug
-                ) ?: save.fileName
-                val stat = saveRepository.localSaveStat(localFileName, platformFsSlug)
-                val hasLocal = stat != null
-                val localMs = stat?.modifiedMs ?: 0L
-                val slotResponse = SaveSlotResponse(
-                    slot = save.slot,
-                    emulator = save.emulator,
-                    hasRemote = true,
-                    remoteUpdatedAt = save.updatedAt
-                )
-                val deviceSync = save.deviceSyncs.find { it.deviceId == deviceId }
-                SlotUiState(
-                    slot = slotResponse,
-                    fileName = localFileName,
-                    saveId = save.id,
-                    hasLocalFile = hasLocal,
-                    localModifiedMs = localMs,
-                    syncAction = determineSyncAction(
-                        slotResponse, hasLocal, localMs, deviceSync,
-                        localHash = stat?.contentHash, remoteHash = save.contentHash
-                    )
-                )
-            }
-            RomSyncGroup(romId, rom.name, platformName, platformFsSlug, romFileName, slots)
+            // Match the orchestrator: sync the ROM's one local file against its
+            // targeted server slot ("default" unless overridden).
+            val target = prefsStore.saveSyncSlotPref(romId).first()
+            val save = saveRepository.syncSavesForRom(romId)
+                .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == target }
+                .maxByOrNull { it.updatedAt ?: "" }
+            val localFileName = saveRepository.resolveLocalSaveFileName(
+                save?.fileName, romFileName, platformFsSlug
+            ) ?: save?.fileName
+            val stat = localFileName?.let { saveRepository.localSaveStat(it, platformFsSlug) }
+            val hasLocal = stat != null
+            val localMs = stat?.modifiedMs ?: 0L
+            val slotResponse = SaveSlotResponse(
+                slot = save?.slot ?: target.takeIf { it != "default" },
+                emulator = save?.emulator,
+                hasRemote = save != null,
+                remoteUpdatedAt = save?.updatedAt
+            )
+            val deviceSync = save?.deviceSyncs?.find { it.deviceId == deviceId }
+            val status = SlotUiState(
+                slot = slotResponse,
+                fileName = localFileName,
+                saveId = save?.id,
+                hasLocalFile = hasLocal,
+                localModifiedMs = localMs,
+                syncAction = determineSyncAction(
+                    slotResponse, hasLocal, localMs, deviceSync,
+                    localHash = stat?.contentHash, remoteHash = save?.contentHash
+                ),
+                isUntracked = deviceSync?.isUntracked ?: false
+            )
+            RomSyncGroup(romId, rom.name, platformName, platformFsSlug, romFileName, status)
         } catch (_: Exception) {
             null
         }
@@ -180,22 +181,20 @@ class SaveSyncAllViewModel @Inject constructor(
         // intent than syncAll's "do the right thing per slot."
         viewModelScope.launch {
             _groups.value = _groups.value.map { group ->
-                group.copy(slots = group.slots.map { slot ->
-                    if (slot.syncAction == SyncAction.UPLOAD) slot.copy(isSyncing = true) else slot
-                })
+                if (group.status.syncAction == SyncAction.UPLOAD)
+                    group.copy(status = group.status.copy(isSyncing = true))
+                else group
             }
-            for (group in _groups.value) {
-                for (slot in group.slots.filter { it.syncAction == SyncAction.UPLOAD }) {
-                    revertOne(group, slot)
-                }
+            for (group in _groups.value.filter { it.status.syncAction == SyncAction.UPLOAD }) {
+                revertOne(group)
             }
             refresh()
         }
     }
 
-    private suspend fun revertOne(group: RomSyncGroup, slot: SlotUiState) {
+    private suspend fun revertOne(group: RomSyncGroup) {
         try {
-            val slotKey = slot.slot.slotKey
+            val slotKey = group.status.slot.slotKey
             val save = saveRepository.syncSavesForRom(group.romId)
                 .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == slotKey }
                 .maxByOrNull { it.updatedAt ?: "" }

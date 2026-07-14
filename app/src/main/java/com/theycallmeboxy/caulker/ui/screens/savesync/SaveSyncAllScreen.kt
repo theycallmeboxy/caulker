@@ -197,43 +197,28 @@ fun SaveSyncAllScreen(
     }
 }
 
-private enum class AggregateStatus { NONE, UP_TO_DATE, DOWNLOAD, UPLOAD, CONFLICT }
-
-private fun aggregateStatus(slots: List<SlotUiState>): AggregateStatus {
-    if (slots.isEmpty()) return AggregateStatus.NONE
-    val actions = slots.map { it.syncAction }.toSet()
-    if (actions.all { it == SyncAction.NONE }) return AggregateStatus.NONE
-    if (actions.all { it == SyncAction.UP_TO_DATE || it == SyncAction.NONE }) return AggregateStatus.UP_TO_DATE
-    if (SyncAction.CONFLICT in actions) return AggregateStatus.CONFLICT
-    val hasUpload = SyncAction.UPLOAD in actions
-    val hasDownload = SyncAction.DOWNLOAD in actions
-    return when {
-        hasUpload && hasDownload -> AggregateStatus.CONFLICT
-        hasDownload -> AggregateStatus.DOWNLOAD
-        else -> AggregateStatus.UPLOAD
-    }
-}
-
 @Composable
 private fun RomSyncRow(group: RomSyncGroup, isSyncing: Boolean, onClick: () -> Unit) {
-    val slotCount = group.slots.size
+    val slotKey = group.status.slot.slotKey
 
     ListItem(
         headlineContent = {
             Text(group.romName, maxLines = 1, overflow = TextOverflow.Ellipsis)
         },
-        supportingContent = {
-            Text(
-                "$slotCount ${if (slotCount == 1) "save slot" else "save slots"}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        },
+        supportingContent = if (slotKey != "default") {
+            {
+                Text(
+                    "Slot: $slotKey",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else null,
         trailingContent = {
             if (isSyncing) {
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             } else {
-                StatusBadge(aggregateStatus(group.slots))
+                StatusBadge(group.status.syncAction)
             }
         },
         modifier = Modifier.clickable(onClick = onClick)
@@ -241,32 +226,32 @@ private fun RomSyncRow(group: RomSyncGroup, isSyncing: Boolean, onClick: () -> U
 }
 
 @Composable
-private fun StatusBadge(status: AggregateStatus) {
+private fun StatusBadge(action: SyncAction) {
     val icon: ImageVector
     val label: String
     val color: Color
-    when (status) {
-        AggregateStatus.UP_TO_DATE -> {
+    when (action) {
+        SyncAction.UP_TO_DATE -> {
             icon = Icons.Default.CheckCircle
             label = "Up to date"
             color = MaterialTheme.colorScheme.primary
         }
-        AggregateStatus.DOWNLOAD -> {
+        SyncAction.DOWNLOAD -> {
             icon = Icons.Default.CloudDownload
             label = "Download"
             color = MaterialTheme.colorScheme.primary
         }
-        AggregateStatus.UPLOAD -> {
+        SyncAction.UPLOAD -> {
             icon = Icons.Default.CloudUpload
             label = "Upload"
             color = MaterialTheme.colorScheme.primary
         }
-        AggregateStatus.CONFLICT -> {
+        SyncAction.CONFLICT -> {
             icon = Icons.Default.Warning
             label = "Out of sync"
             color = MaterialTheme.colorScheme.error
         }
-        AggregateStatus.NONE -> {
+        SyncAction.NONE -> {
             icon = Icons.Default.Remove
             label = "No saves"
             color = MaterialTheme.colorScheme.onSurfaceVariant
