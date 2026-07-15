@@ -130,7 +130,10 @@ data class DeviceSaveSync(
 data class SaveResponse(
     val id: Int,
     @Json(name = "rom_id") val romId: Int,
+    // RomM <=4.9 exposed the origin device as top-level `device_id`; 5.0 renamed
+    // it to `origin_device_id`. Read both so attribution survives either server.
     @Json(name = "device_id") val deviceId: String? = null,
+    @Json(name = "origin_device_id") val originDeviceId: String? = null,
     val slot: String? = null,
     val emulator: String? = null,
     @Json(name = "file_name") val fileName: String,

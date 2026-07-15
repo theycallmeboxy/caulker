@@ -178,14 +178,17 @@ class SaveRepository @Inject constructor(
         platformFsSlug: String?,
         sessionId: Int? = null,
         autocleanup: Boolean = true,
-        autocleanupLimit: Int = 10
+        autocleanupLimit: Int = 10,
+        // When true, force the server to accept this upload even if a newer save
+        // exists in the slot — used by conflict "Keep Local" so it can actually win.
+        overwrite: Boolean = false
     ): Long {
         val dir = effectiveSaveDir(platformFsSlug)
             ?: error("Save folder not configured — go to Settings")
         val bytes = rootHelper.readBytes("$dir/$fileName")
         val deviceId = getOrRegisterDeviceId()
         val saved = uploadBytes(
-            romId, slotKey, fileName, deviceId, bytes, sessionId, autocleanup, autocleanupLimit
+            romId, slotKey, fileName, deviceId, bytes, sessionId, autocleanup, autocleanupLimit, overwrite
         )
         val serverMs = parseIsoToMs(saved.updatedAt) ?: System.currentTimeMillis()
         rootHelper.setLastModified("$dir/$fileName", serverMs)
@@ -218,7 +221,8 @@ class SaveRepository @Inject constructor(
         data: ByteArray,
         sessionId: Int? = null,
         autocleanup: Boolean = true,
-        autocleanupLimit: Int = 10
+        autocleanupLimit: Int = 10,
+        overwrite: Boolean = false
     ): SaveResponse = withContext(Dispatchers.IO) {
         val tmp = File(context.cacheDir, "save_upload_$fileName")
         try {
@@ -231,7 +235,7 @@ class SaveRepository @Inject constructor(
                     deviceId = deviceId,
                     slot = slotKey,
                     emulator = "caulker",
-                    overwrite = false,
+                    overwrite = overwrite,
                     sessionId = sessionId,
                     autocleanup = autocleanup,
                     autocleanupLimit = autocleanupLimit,
@@ -297,7 +301,7 @@ class SaveRepository @Inject constructor(
             SaveEntity(
                 id = it.id,
                 romId = it.romId,
-                deviceId = it.deviceId,
+                deviceId = it.deviceId ?: it.originDeviceId,
                 slot = it.slot?.takeIf { s -> s.isNotBlank() } ?: "default",
                 emulator = it.emulator,
                 fileName = it.fileName,

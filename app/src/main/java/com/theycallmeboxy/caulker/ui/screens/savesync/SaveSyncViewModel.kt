@@ -174,7 +174,9 @@ class SaveSyncViewModel @Inject constructor(
         }
     }
 
-    fun keepLocal() { _status.value?.let { upload(it) } }
+    // Conflict "Keep Local": the server has a newer save, so force overwrite —
+    // otherwise the upload 409s and the conflict just re-appears.
+    fun keepLocal() { _status.value?.let { upload(it, overwrite = true) } }
     fun keepRemote() { _status.value?.let { download(it) } }
 
     // RomM 4.9: pause/resume sync tracking for this save on this device. A paused
@@ -240,7 +242,7 @@ class SaveSyncViewModel @Inject constructor(
         }
     }
 
-    private fun upload(state: SlotUiState) {
+    private fun upload(state: SlotUiState, overwrite: Boolean = false) {
         val slotKey = state.slot.slotKey
         val fileName = state.fileName ?: run {
             setStatus { it.copy(message = "No save file found — make sure your save folder is configured correctly", isError = true) }
@@ -249,7 +251,7 @@ class SaveSyncViewModel @Inject constructor(
         viewModelScope.launch {
             setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
-                val serverMs = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug)
+                val serverMs = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug, overwrite = overwrite)
                 setStatus {
                     it.copy(
                         isSyncing = false,
