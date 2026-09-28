@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -46,7 +47,8 @@ sealed interface SaveSyncOverallState {
 class SaveSyncOrchestrator @Inject constructor(
     private val prefsStore: PrefsStore,
     private val saveRepository: SaveRepository,
-    private val romRepository: RomRepository
+    private val romRepository: RomRepository,
+    private val saveSyncLock: SaveSyncLock
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow<SaveSyncOverallState>(SaveSyncOverallState.Idle)
@@ -75,117 +77,146 @@ class SaveSyncOrchestrator @Inject constructor(
         val slot: String,
         val localFileName: String?,
         val platformFsSlug: String?,
-        val emulator: String?
+        val emulator: String?,
+        // Local file content hash as captured pre-negotiate (phase 1), used as a
+        // defense-in-depth check before overwriting with a "download" op: if the
+        // file changed since, something else (a manual upload) wrote it after we
+        // reported it to the server, so we must not clobber it.
+        val negotiatedContentHash: String? = null
     )
 
     private suspend fun run() {
         try {
-            val enrolled = prefsStore.saveSyncEnrolled.first().toList()
-            if (enrolled.isEmpty()) {
-                _state.value = SaveSyncOverallState.Done(0, 0, 0, 0)
-                return
-            }
+            saveSyncLock.mutex.withLock { runLocked() }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            _state.value = SaveSyncOverallState.Idle
+            throw e
+        } catch (e: Exception) {
+            _state.value = SaveSyncOverallState.Error(e.message ?: "Save sync failed")
+        }
+    }
 
-            val deviceId = saveRepository.getOrRegisterDeviceId()
+    // Runs while saveSyncLock is held for the whole negotiate→execute→close
+    // sequence, so no per-ROM manual action can race it.
+    private suspend fun runLocked() {
+        val enrolled = prefsStore.saveSyncEnrolled.first().toList()
+        if (enrolled.isEmpty()) {
+            _state.value = SaveSyncOverallState.Done(0, 0, 0, 0)
+            return
+        }
 
-            // --- Phase 1: gather local save state for each enrolled ROM. ---
-            // The real total isn't known until negotiate returns the actionable set
-            // (phase 3), so this phase reports total=0 as a "preparing" sentinel
-            // rather than enrolled.size, which would otherwise visibly jump down
-            // once the real (typically smaller) actionable count is known.
-            _state.value = SaveSyncOverallState.Syncing(done = 0, total = 0)
-            val ctxByRom = HashMap<Int, RomCtx>()
-            val clientSaves = ArrayList<ClientSaveState>()
+        val deviceId = saveRepository.getOrRegisterDeviceId()
 
-            enrolled.forEachIndexed { index, romId ->
-                val rom = romRepository.getById(romId) ?: return@forEachIndexed
-                _state.value = SaveSyncOverallState.Syncing(
-                    done = 0, total = 0, currentRomId = romId, currentRomName = rom.name
-                )
-                val slot = prefsStore.saveSyncSlotPref(rom.id).first()
-                val serverSaves = try { saveRepository.syncSavesForRom(rom.id) } catch (_: Exception) { emptyList() }
-                // Strict (rom_id, slot) match, mirroring server negotiate pairing —
-                // a null-slot save is archival and never pairs against a named slot.
-                val serverSave = serverSaves
-                    .filter { it.slot == slot }
-                    .maxByOrNull { it.updatedAt ?: "" }
-                val localFileName = saveRepository.resolveLocalSaveFileName(
-                    serverSave?.fileName, rom.fileName, rom.platformFsSlug
-                ) ?: serverSave?.fileName
+        // --- Phase 1: gather local save state for each enrolled ROM. ---
+        // The real total isn't known until negotiate returns the actionable set
+        // (phase 3), so this phase reports total=0 as a "preparing" sentinel
+        // rather than enrolled.size, which would otherwise visibly jump down
+        // once the real (typically smaller) actionable count is known.
+        _state.value = SaveSyncOverallState.Syncing(done = 0, total = 0)
+        val ctxByRom = HashMap<Int, RomCtx>()
+        val clientSaves = ArrayList<ClientSaveState>()
 
-                ctxByRom[romId] = RomCtx(
-                    rom = rom,
+        enrolled.forEachIndexed { index, romId ->
+            val rom = romRepository.getById(romId) ?: return@forEachIndexed
+            _state.value = SaveSyncOverallState.Syncing(
+                done = 0, total = 0, currentRomId = romId, currentRomName = rom.name
+            )
+            val slot = prefsStore.saveSyncSlotPref(rom.id).first()
+            val serverSaves = try { saveRepository.syncSavesForRom(rom.id) } catch (_: Exception) { emptyList() }
+            // Strict (rom_id, slot) match, mirroring server negotiate pairing —
+            // a null-slot save is archival and never pairs against a named slot.
+            val serverSave = serverSaves
+                .filter { it.slot == slot }
+                .maxByOrNull { it.updatedAt ?: "" }
+            val localFileName = saveRepository.resolveLocalSaveFileName(
+                serverSave?.fileName, rom.fileName, rom.platformFsSlug
+            ) ?: serverSave?.fileName
+
+            val stat = localFileName?.let { saveRepository.localSaveStat(it, rom.platformFsSlug) }
+
+            ctxByRom[romId] = RomCtx(
+                rom = rom,
+                slot = slot,
+                localFileName = localFileName,
+                platformFsSlug = rom.platformFsSlug,
+                emulator = serverSave?.emulator,
+                negotiatedContentHash = stat?.contentHash
+            )
+
+            if (localFileName != null && stat != null) {
+                clientSaves += ClientSaveState(
+                    romId = romId,
+                    fileName = localFileName,
                     slot = slot,
-                    localFileName = localFileName,
-                    platformFsSlug = rom.platformFsSlug,
-                    emulator = serverSave?.emulator
+                    emulator = serverSave?.emulator ?: "caulker",
+                    contentHash = stat.contentHash,
+                    updatedAt = msToIso(stat.modifiedMs),
+                    fileSizeBytes = stat.sizeBytes
                 )
-
-                if (localFileName != null) {
-                    val stat = saveRepository.localSaveStat(localFileName, rom.platformFsSlug)
-                    if (stat != null) {
-                        clientSaves += ClientSaveState(
-                            romId = romId,
-                            fileName = localFileName,
-                            slot = slot,
-                            emulator = serverSave?.emulator ?: "caulker",
-                            contentHash = stat.contentHash,
-                            updatedAt = msToIso(stat.modifiedMs),
-                            fileSizeBytes = stat.sizeBytes
-                        )
-                    }
-                }
             }
+        }
 
-            // --- Phase 2: ask the server to plan the sync. ---
-            val neg = saveRepository.negotiate(deviceId, clientSaves)
-            val enrolledSet = enrolled.toSet()
+        // --- Phase 2: ask the server to plan the sync. ---
+        val neg = saveRepository.negotiate(deviceId, clientSaves)
+        val enrolledSet = enrolled.toSet()
 
-            fun matchesEnrolledSlot(op: SyncOperation): Boolean {
-                if (op.romId !in enrolledSet) return false
-                val ctxSlot = ctxByRom[op.romId]?.slot ?: "default"
-                return op.slot == ctxSlot
-            }
+        fun matchesEnrolledSlot(op: SyncOperation): Boolean {
+            if (op.romId !in enrolledSet) return false
+            val ctxSlot = ctxByRom[op.romId]?.slot ?: "default"
+            return op.slot == ctxSlot
+        }
 
-            val actionable = neg.operations.filter {
-                matchesEnrolledSlot(it) && (it.action == "upload" || it.action == "download")
-            }
-            val conflicts = neg.operations.count { matchesEnrolledSlot(it) && it.action == "conflict" }
+        val actionable = neg.operations.filter {
+            matchesEnrolledSlot(it) && (it.action == "upload" || it.action == "download")
+        }
+        val conflicts = neg.operations.count { matchesEnrolledSlot(it) && it.action == "conflict" }
 
-            // --- Phase 3: execute the planned operations. ---
-            var uploaded = 0
-            var downloaded = 0
-            var skipped = 0
-            var errors = 0
+        // --- Phase 3: execute the planned operations. ---
+        var uploaded = 0
+        var downloaded = 0
+        var skipped = 0
+        var errors = 0
 
-            actionable.forEachIndexed { index, op ->
-                val ctx = ctxByRom[op.romId] ?: return@forEachIndexed
-                _state.value = SaveSyncOverallState.Syncing(
-                    done = index, total = actionable.size, currentRomId = op.romId, currentRomName = ctx.rom.name
-                )
-                try {
-                    when (op.action) {
-                        "upload" -> {
-                            val fileName = ctx.localFileName
-                            if (fileName == null) {
-                                skipped++
-                            } else {
-                                saveRepository.uploadSaveFromDisk(
-                                    op.romId, ctx.slot, fileName, ctx.platformFsSlug, sessionId = neg.sessionId
-                                )
-                                uploaded++
-                            }
+        actionable.forEachIndexed { index, op ->
+            val ctx = ctxByRom[op.romId] ?: return@forEachIndexed
+            _state.value = SaveSyncOverallState.Syncing(
+                done = index, total = actionable.size, currentRomId = op.romId, currentRomName = ctx.rom.name
+            )
+            try {
+                when (op.action) {
+                    "upload" -> {
+                        val fileName = ctx.localFileName
+                        if (fileName == null) {
+                            skipped++
+                        } else {
+                            saveRepository.uploadSaveFromDisk(
+                                op.romId, ctx.slot, fileName, ctx.platformFsSlug, sessionId = neg.sessionId
+                            )
+                            uploaded++
                         }
-                        "download" -> {
-                            val saveId = op.saveId
-                            if (saveId == null) {
+                    }
+                    "download" -> {
+                        val saveId = op.saveId
+                        if (saveId == null) {
+                            skipped++
+                        } else {
+                            val fileName = ctx.localFileName
+                                ?: saveRepository.resolveLocalSaveFileName(
+                                    op.fileName, ctx.rom.fileName, ctx.platformFsSlug
+                                )
+                                ?: op.fileName
+                            // Defense in depth: even though the lock should prevent any
+                            // other path from touching this file during our run, guard
+                            // against clock/mtime surprises by re-checking the file's
+                            // state right before overwriting it. If it no longer matches
+                            // what we reported to negotiate, skip rather than clobber.
+                            val currentStat = saveRepository.localSaveStat(fileName, ctx.platformFsSlug)
+                            val changedSinceNegotiate = ctx.negotiatedContentHash != null &&
+                                currentStat != null &&
+                                currentStat.contentHash != ctx.negotiatedContentHash
+                            if (changedSinceNegotiate) {
                                 skipped++
                             } else {
-                                val fileName = ctx.localFileName
-                                    ?: saveRepository.resolveLocalSaveFileName(
-                                        op.fileName, ctx.rom.fileName, ctx.platformFsSlug
-                                    )
-                                    ?: op.fileName
                                 val remoteMs = parseIsoToMs(op.serverUpdatedAt)
                                 saveRepository.downloadSave(
                                     saveId, fileName, ctx.platformFsSlug, remoteMs, sessionId = neg.sessionId
@@ -194,30 +225,25 @@ class SaveSyncOrchestrator @Inject constructor(
                             }
                         }
                     }
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    errors++
                 }
-            }
-
-            // --- Phase 4: close the session. ---
-            try {
-                saveRepository.completeSession(
-                    neg.sessionId,
-                    operationsCompleted = uploaded + downloaded,
-                    operationsFailed = errors
-                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (_: Exception) {
-                // best-effort; the sync itself already happened
+                errors++
             }
-
-            _state.value = SaveSyncOverallState.Done(uploaded, downloaded, skipped + conflicts, errors)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            _state.value = SaveSyncOverallState.Idle
-            throw e
-        } catch (e: Exception) {
-            _state.value = SaveSyncOverallState.Error(e.message ?: "Save sync failed")
         }
+
+        // --- Phase 4: close the session. ---
+        try {
+            saveRepository.completeSession(
+                neg.sessionId,
+                operationsCompleted = uploaded + downloaded,
+                operationsFailed = errors
+            )
+        } catch (_: Exception) {
+            // best-effort; the sync itself already happened
+        }
+
+        _state.value = SaveSyncOverallState.Done(uploaded, downloaded, skipped + conflicts, errors)
     }
 }

@@ -8,6 +8,9 @@ import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import com.theycallmeboxy.caulker.data.repository.BackupInfo
 import com.theycallmeboxy.caulker.data.repository.RomRepository
 import com.theycallmeboxy.caulker.data.repository.SaveRepository
+import com.theycallmeboxy.caulker.data.sync.SaveSyncLock
+import com.theycallmeboxy.caulker.data.sync.SaveSyncOrchestrator
+import com.theycallmeboxy.caulker.data.sync.SaveSyncOverallState
 import com.theycallmeboxy.caulker.data.sync.SyncAction
 import com.theycallmeboxy.caulker.data.sync.determineSyncAction
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
@@ -40,7 +43,9 @@ class SaveSyncViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val saveRepository: SaveRepository,
     private val romRepository: RomRepository,
-    private val prefsStore: PrefsStore
+    private val prefsStore: PrefsStore,
+    private val saveSyncLock: SaveSyncLock,
+    private val orchestrator: SaveSyncOrchestrator
 ) : ViewModel() {
 
     private val romId: Int = checkNotNull(savedStateHandle["romId"])
@@ -71,6 +76,13 @@ class SaveSyncViewModel @Inject constructor(
 
     private val _error = MutableStateFlow<String?>(null)
     val error = _error.asStateFlow()
+
+    // True while the app-wide "sync all" orchestrator is running, so the UI can
+    // disable this screen's own download/upload actions rather than let the
+    // user kick off an action that will just be rejected by the lock below.
+    val isBulkSyncing: StateFlow<Boolean> = orchestrator.state
+        .map { it is SaveSyncOverallState.Syncing }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     init {
         viewModelScope.launch {
@@ -218,9 +230,17 @@ class SaveSyncViewModel @Inject constructor(
         }
     }
 
+    // Message shown when a bulk "sync all" run holds the lock and this screen's
+    // action can't proceed right now.
+    private val lockedMessage = "Save sync in progress — try again when it finishes"
+
     private fun download(state: SlotUiState) {
         val slotKey = state.slot.slotKey
         viewModelScope.launch {
+            if (!saveSyncLock.mutex.tryLock()) {
+                setStatus { it.copy(message = lockedMessage, isError = true) }
+                return@launch
+            }
             setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
                 val save = saveRepository.syncSavesForRom(romId)
@@ -248,6 +268,8 @@ class SaveSyncViewModel @Inject constructor(
                 }
             } catch (e: Exception) {
                 setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
+            } finally {
+                saveSyncLock.mutex.unlock()
             }
         }
     }
@@ -259,6 +281,10 @@ class SaveSyncViewModel @Inject constructor(
             return
         }
         viewModelScope.launch {
+            if (!saveSyncLock.mutex.tryLock()) {
+                setStatus { it.copy(message = lockedMessage, isError = true) }
+                return@launch
+            }
             setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
                 val serverMs = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug, overwrite = overwrite)
@@ -278,6 +304,8 @@ class SaveSyncViewModel @Inject constructor(
                 }
             } catch (e: Exception) {
                 setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
+            } finally {
+                saveSyncLock.mutex.unlock()
             }
         }
     }

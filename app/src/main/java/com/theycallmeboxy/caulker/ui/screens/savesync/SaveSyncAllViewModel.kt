@@ -7,6 +7,7 @@ import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import com.theycallmeboxy.caulker.data.repository.PlatformRepository
 import com.theycallmeboxy.caulker.data.repository.RomRepository
 import com.theycallmeboxy.caulker.data.repository.SaveRepository
+import com.theycallmeboxy.caulker.data.sync.SaveSyncLock
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOrchestrator
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOverallState
 import com.theycallmeboxy.caulker.data.sync.SyncAction
@@ -41,7 +42,8 @@ class SaveSyncAllViewModel @Inject constructor(
     private val romRepository: RomRepository,
     private val platformRepository: PlatformRepository,
     private val saveRepository: SaveRepository,
-    private val orchestrator: SaveSyncOrchestrator
+    private val orchestrator: SaveSyncOrchestrator,
+    private val saveSyncLock: SaveSyncLock
 ) : ViewModel() {
 
     private val _groups = MutableStateFlow<List<RomSyncGroup>>(emptyList())
@@ -192,14 +194,27 @@ class SaveSyncAllViewModel @Inject constructor(
         // server), download instead — discard local changes for whatever's
         // currently desynced. Kept local to the ViewModel since it's a different
         // intent than syncAll's "do the right thing per slot."
+        //
+        // This mutates local save files directly (bypassing the orchestrator),
+        // so it must hold the same app-wide lock the orchestrator and per-ROM
+        // screen use — otherwise a bulk sync in progress could race these
+        // downloads against its own negotiated ops.
         viewModelScope.launch {
-            _groups.value = _groups.value.map { group ->
-                if (group.status.syncAction == SyncAction.UPLOAD)
-                    group.copy(status = group.status.copy(isSyncing = true))
-                else group
+            if (!saveSyncLock.mutex.tryLock()) {
+                _error.value = "Save sync in progress — try again when it finishes"
+                return@launch
             }
-            for (group in _groups.value.filter { it.status.syncAction == SyncAction.UPLOAD }) {
-                revertOne(group)
+            try {
+                _groups.value = _groups.value.map { group ->
+                    if (group.status.syncAction == SyncAction.UPLOAD)
+                        group.copy(status = group.status.copy(isSyncing = true))
+                    else group
+                }
+                for (group in _groups.value.filter { it.status.syncAction == SyncAction.UPLOAD }) {
+                    revertOne(group)
+                }
+            } finally {
+                saveSyncLock.mutex.unlock()
             }
             refresh()
         }

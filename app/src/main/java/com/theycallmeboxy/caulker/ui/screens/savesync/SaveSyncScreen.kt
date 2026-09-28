@@ -39,6 +39,7 @@ fun SaveSyncScreen(
     val targetSlot by viewModel.targetSlot.collectAsState()
     val isSaveSyncEnrolled by viewModel.isSaveSyncEnrolled.collectAsState()
     val serverSlots by viewModel.serverSlots.collectAsState()
+    val isBulkSyncing by viewModel.isBulkSyncing.collectAsState()
 
     var showSlotDialog by remember { mutableStateOf(false) }
 
@@ -138,6 +139,7 @@ fun SaveSyncScreen(
             ) {
                 SaveStatusSection(
                     state = status!!,
+                    isBulkSyncing = isBulkSyncing,
                     onSmartSync = viewModel::smartSync,
                     onKeepLocal = viewModel::keepLocal,
                     onKeepRemote = viewModel::keepRemote,
@@ -166,6 +168,7 @@ fun SaveSyncScreen(
 @Composable
 private fun SaveStatusSection(
     state: SlotUiState,
+    isBulkSyncing: Boolean,
     onSmartSync: () -> Unit,
     onKeepLocal: () -> Unit,
     onKeepRemote: () -> Unit,
@@ -173,6 +176,10 @@ private fun SaveStatusSection(
 ) {
     val context = LocalContext.current
     val slot = state.slot
+    // Bulk "sync all" holds the same save-mutation lock this screen's actions
+    // use, so disable them while it's running instead of letting the tap fail
+    // with a locked-message after the fact.
+    val actionsEnabled = !state.isSyncing && !isBulkSyncing
 
     Column(
         modifier = Modifier
@@ -291,7 +298,7 @@ private fun SaveStatusSection(
             SyncAction.DOWNLOAD -> {
                 Button(
                     onClick = onSmartSync,
-                    enabled = !state.isSyncing,
+                    enabled = actionsEnabled,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Default.CloudDownload, null, modifier = Modifier.size(18.dp))
@@ -303,7 +310,7 @@ private fun SaveStatusSection(
             SyncAction.UPLOAD -> {
                 Button(
                     onClick = onSmartSync,
-                    enabled = !state.isSyncing,
+                    enabled = actionsEnabled,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Default.CloudUpload, null, modifier = Modifier.size(18.dp))
@@ -336,7 +343,7 @@ private fun SaveStatusSection(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = onKeepLocal,
-                        enabled = !state.isSyncing,
+                        enabled = actionsEnabled,
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.CloudUpload, null, modifier = Modifier.size(18.dp))
@@ -345,7 +352,7 @@ private fun SaveStatusSection(
                     }
                     OutlinedButton(
                         onClick = onKeepRemote,
-                        enabled = !state.isSyncing,
+                        enabled = actionsEnabled,
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.CloudDownload, null, modifier = Modifier.size(18.dp))
