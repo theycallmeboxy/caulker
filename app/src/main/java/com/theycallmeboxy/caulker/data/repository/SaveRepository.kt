@@ -33,6 +33,11 @@ data class BackupInfo(val count: Int, val latestMs: Long)
 // Local save fingerprint used to build a ClientSaveState for sync negotiation.
 data class LocalSaveStat(val contentHash: String, val sizeBytes: Long, val modifiedMs: Long)
 
+// Result of a successful upload — the server's authoritative save id/hash for
+// what was just written, so callers can record it as the new sync baseline
+// without re-reading (and re-hashing) the local file.
+data class UploadResult(val serverMs: Long, val saveId: Int, val contentHash: String?)
+
 @Singleton
 class SaveRepository @Inject constructor(
     private val api: RommApiService,
@@ -162,9 +167,10 @@ class SaveRepository @Inject constructor(
     }
 
     // Uploads a save that already exists on-device at the resolved save path.
-    // Uses root access if the path requires it. Returns the server's recorded updatedAt as
-    // epoch ms, which is also applied as the local file's mtime so the two clocks agree on
-    // the next sync comparison.
+    // Uses root access if the path requires it. Returns the server's recorded
+    // save id/updatedAt/content_hash — the updatedAt (as epoch ms) is also
+    // applied as the local file's mtime so the two clocks agree on the next
+    // sync comparison, and the id/hash let the caller record a sync baseline.
     suspend fun uploadSaveFromDisk(
         romId: Int,
         slotKey: String,
@@ -176,7 +182,7 @@ class SaveRepository @Inject constructor(
         // When true, force the server to accept this upload even if a newer save
         // exists in the slot — used by conflict "Keep Local" so it can actually win.
         overwrite: Boolean = false
-    ): Long {
+    ): UploadResult {
         val dir = effectiveSaveDir(platformFsSlug)
             ?: error("Save folder not configured — go to Settings")
         val bytes = rootHelper.readBytes("$dir/$fileName")
@@ -186,7 +192,7 @@ class SaveRepository @Inject constructor(
         )
         val serverMs = parseIsoToMs(saved.updatedAt) ?: System.currentTimeMillis()
         rootHelper.setLastModified("$dir/$fileName", serverMs)
-        return serverMs
+        return UploadResult(serverMs, saved.id, saved.contentHash)
     }
 
     // Uploads via POST /api/saves. In RomM 4.9, slot uploads are datetime-tagged

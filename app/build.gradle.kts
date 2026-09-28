@@ -97,4 +97,6 @@ dependencies {
 
     implementation(libs.coil.compose)
     implementation(libs.libsu.core)
+
+    testImplementation(libs.junit)
 }

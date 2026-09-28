@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.theycallmeboxy.caulker.data.sync.SyncBaseline
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -44,6 +45,7 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
         val PLATFORM_OVERRIDES = stringPreferencesKey("platform_overrides")
         val SAVE_SYNC_ENROLLED = stringPreferencesKey("save_sync_enrolled")
         val SAVE_SYNC_SLOT_PREFS = stringPreferencesKey("save_sync_slot_prefs")
+        val SAVE_SYNC_BASELINE = stringPreferencesKey("save_sync_baseline")
         val INSECURE_SKIP_VERIFY = booleanPreferencesKey("insecure_skip_verify")
         val GLOBAL_ROM_SYNC_TIME = longPreferencesKey("global_rom_sync_time")
     }
@@ -74,6 +76,7 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
     suspend fun unenrollFromSaveSync(romId: Int) = context.dataStore.edit { prefs ->
         val current = parseEnrolled(prefs[Keys.SAVE_SYNC_ENROLLED])
         prefs[Keys.SAVE_SYNC_ENROLLED] = serializeEnrolled(current - romId)
+        removeBaselinesForRom(prefs, romId)
     }
 
     // Batched variants for bulk selection actions — one read-modify-write instead
@@ -87,6 +90,7 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
     suspend fun unenrollAllFromSaveSync(romIds: Collection<Int>) = context.dataStore.edit { prefs ->
         val current = parseEnrolled(prefs[Keys.SAVE_SYNC_ENROLLED])
         prefs[Keys.SAVE_SYNC_ENROLLED] = serializeEnrolled(current - romIds)
+        romIds.forEach { removeBaselinesForRom(prefs, it) }
     }
 
     private fun parseEnrolled(json: String?): Set<Int> {
@@ -154,6 +158,53 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
             obj.put(romId.toString(), slotKey)
             prefs[Keys.SAVE_SYNC_SLOT_PREFS] = obj.toString()
         }
+    }
+
+    // The content hash (+ diagnostics) of the save version this device last
+    // successfully synced for (romId, slotKey) — the common-ancestor baseline
+    // determineSyncAction() uses for its 3-way merge. Written after every
+    // successful upload/download/conflict-resolution, cleared on unenroll.
+    suspend fun getSyncBaseline(romId: Int, slotKey: String): SyncBaseline? {
+        val json = context.dataStore.data.first()[Keys.SAVE_SYNC_BASELINE] ?: return null
+        return try {
+            val entry = JSONObject(json).optJSONObject(baselineKey(romId, slotKey)) ?: return null
+            val hash = entry.optString("hash").takeIf { it.isNotBlank() } ?: return null
+            SyncBaseline(
+                contentHash = hash,
+                saveId = entry.optInt("saveId", -1).takeIf { it >= 0 },
+                updatedAt = entry.optString("updatedAt").takeIf { it.isNotBlank() }
+            )
+        } catch (_: Exception) { null }
+    }
+
+    suspend fun setSyncBaseline(romId: Int, slotKey: String, baseline: SyncBaseline) {
+        context.dataStore.edit { prefs ->
+            val obj = try {
+                prefs[Keys.SAVE_SYNC_BASELINE]?.let { JSONObject(it) } ?: JSONObject()
+            } catch (_: Exception) { JSONObject() }
+            val entry = JSONObject()
+            entry.put("hash", baseline.contentHash)
+            baseline.saveId?.let { entry.put("saveId", it) }
+            baseline.updatedAt?.let { entry.put("updatedAt", it) }
+            obj.put(baselineKey(romId, slotKey), entry)
+            prefs[Keys.SAVE_SYNC_BASELINE] = obj.toString()
+        }
+    }
+
+    private fun baselineKey(romId: Int, slotKey: String) = "$romId:$slotKey"
+
+    // Drops every slot's baseline for a ROM (called from within an existing
+    // dataStore.edit block so it composes with the enrollment-set update).
+    private fun removeBaselinesForRom(prefs: androidx.datastore.preferences.core.MutablePreferences, romId: Int) {
+        val json = prefs[Keys.SAVE_SYNC_BASELINE] ?: return
+        try {
+            val obj = JSONObject(json)
+            val prefix = "$romId:"
+            val toRemove = obj.keys().asSequence().filter { it.startsWith(prefix) }.toList()
+            if (toRemove.isEmpty()) return
+            toRemove.forEach { obj.remove(it) }
+            prefs[Keys.SAVE_SYNC_BASELINE] = obj.toString()
+        } catch (_: Exception) { /* leave baseline prefs untouched on parse failure */ }
     }
 
     // Cursor for the global incremental ROM sweep (updated_after). 0 = never synced.

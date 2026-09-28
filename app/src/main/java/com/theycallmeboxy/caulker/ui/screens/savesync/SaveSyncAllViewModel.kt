@@ -11,6 +11,7 @@ import com.theycallmeboxy.caulker.data.sync.SaveSyncLock
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOrchestrator
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOverallState
 import com.theycallmeboxy.caulker.data.sync.SyncAction
+import com.theycallmeboxy.caulker.data.sync.SyncBaseline
 import com.theycallmeboxy.caulker.data.sync.determineSyncAction
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -161,6 +162,7 @@ class SaveSyncAllViewModel @Inject constructor(
                 remoteUpdatedAt = save?.updatedAt
             )
             val deviceSync = save?.deviceSyncs?.find { it.deviceId == deviceId }
+            val baseline = prefsStore.getSyncBaseline(romId, target)
             val status = SlotUiState(
                 slot = slotResponse,
                 fileName = localFileName,
@@ -169,7 +171,8 @@ class SaveSyncAllViewModel @Inject constructor(
                 localModifiedMs = localMs,
                 syncAction = determineSyncAction(
                     slotResponse, hasLocal, localMs, deviceSync,
-                    localHash = stat?.contentHash, remoteHash = save?.contentHash
+                    localHash = stat?.contentHash, remoteHash = save?.contentHash,
+                    baseline = baseline
                 ),
                 isUntracked = deviceSync?.isUntracked ?: false
             )
@@ -232,6 +235,13 @@ class SaveSyncAllViewModel @Inject constructor(
                 save.fileName, group.romFileName, group.platformFsSlug
             ) ?: save.fileName
             saveRepository.downloadSave(save.id, localFileName, group.platformFsSlug, remoteMs)
+            // The local file now matches what the server had — record that as the
+            // new common-ancestor baseline for future decisions.
+            val baselineHash = save.contentHash
+                ?: saveRepository.localSaveStat(localFileName, group.platformFsSlug)?.contentHash
+            if (baselineHash != null) {
+                prefsStore.setSyncBaseline(group.romId, slotKey, SyncBaseline(baselineHash, save.id, save.updatedAt))
+            }
         } catch (_: Exception) {
             // best-effort revert; row repaints on the refresh() after the loop
         }

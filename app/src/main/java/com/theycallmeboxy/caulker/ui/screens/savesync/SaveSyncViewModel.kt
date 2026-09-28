@@ -12,7 +12,9 @@ import com.theycallmeboxy.caulker.data.sync.SaveSyncLock
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOrchestrator
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOverallState
 import com.theycallmeboxy.caulker.data.sync.SyncAction
+import com.theycallmeboxy.caulker.data.sync.SyncBaseline
 import com.theycallmeboxy.caulker.data.sync.determineSyncAction
+import com.theycallmeboxy.caulker.data.util.msToIso
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -137,6 +139,7 @@ class SaveSyncViewModel @Inject constructor(
                     remoteUpdatedAt = save?.updatedAt
                 )
                 val deviceSync = save?.deviceSyncs?.find { it.deviceId == deviceId }
+                val baseline = prefsStore.getSyncBaseline(romId, target)
                 _status.value = SlotUiState(
                     slot = slotResponse,
                     fileName = localFileName,
@@ -145,7 +148,8 @@ class SaveSyncViewModel @Inject constructor(
                     localModifiedMs = localMs,
                     syncAction = determineSyncAction(
                         slotResponse, hasLocal, localMs, deviceSync,
-                        localHash = stat?.contentHash, remoteHash = save?.contentHash
+                        localHash = stat?.contentHash, remoteHash = save?.contentHash,
+                        baseline = baseline
                     ),
                     isUntracked = deviceSync?.isUntracked ?: false,
                     backupInfo = localFileName?.let { saveRepository.getBackupInfo(it, platformFsSlug) },
@@ -255,6 +259,13 @@ class SaveSyncViewModel @Inject constructor(
                 val newLocalMs = saveRepository.localSaveModifiedMs(localFileName, platformFsSlug)
                 val newLocalPath = saveRepository.getLocalFilePath(localFileName, platformFsSlug)
                 val newBackupInfo = saveRepository.getBackupInfo(localFileName, platformFsSlug)
+                // Now that the local file matches what the server had, that content
+                // hash becomes the new common-ancestor baseline for future decisions.
+                val baselineHash = save.contentHash
+                    ?: saveRepository.localSaveStat(localFileName, platformFsSlug)?.contentHash
+                if (baselineHash != null) {
+                    prefsStore.setSyncBaseline(romId, slotKey, SyncBaseline(baselineHash, save.id, save.updatedAt))
+                }
                 setStatus {
                     it.copy(
                         isSyncing = false,
@@ -289,20 +300,25 @@ class SaveSyncViewModel @Inject constructor(
             }
             setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
-                val serverMs = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug, overwrite = overwrite)
+                val result = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug, overwrite = overwrite)
                 val newBackupInfo = saveRepository.getBackupInfo(fileName, platformFsSlug)
+                // The server now holds exactly what we just uploaded — record its
+                // hash as the new common-ancestor baseline for future decisions.
+                result.contentHash?.let { hash ->
+                    prefsStore.setSyncBaseline(romId, slotKey, SyncBaseline(hash, result.saveId, msToIso(result.serverMs)))
+                }
                 setStatus {
                     it.copy(
                         isSyncing = false,
                         hasLocalFile = true,
-                        localModifiedMs = serverMs,
+                        localModifiedMs = result.serverMs,
                         syncAction = SyncAction.UP_TO_DATE,
                         message = "Uploaded $fileName",
                         isError = false,
                         backupInfo = newBackupInfo,
                         slot = it.slot.copy(
                             hasRemote = true,
-                            remoteUpdatedAt = java.time.Instant.ofEpochMilli(serverMs).toString()
+                            remoteUpdatedAt = msToIso(result.serverMs)
                         )
                     )
                 }

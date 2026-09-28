@@ -1,5 +1,6 @@
 package com.theycallmeboxy.caulker.data.sync
 
+import com.theycallmeboxy.caulker.data.api.SaveConflictException
 import com.theycallmeboxy.caulker.data.api.model.ClientSaveState
 import com.theycallmeboxy.caulker.data.api.model.SyncOperation
 import com.theycallmeboxy.caulker.data.db.entity.RomEntity
@@ -169,7 +170,7 @@ class SaveSyncOrchestrator @Inject constructor(
         val actionable = neg.operations.filter {
             matchesEnrolledSlot(it) && (it.action == "upload" || it.action == "download")
         }
-        val conflicts = neg.operations.count { matchesEnrolledSlot(it) && it.action == "conflict" }
+        var conflicts = neg.operations.count { matchesEnrolledSlot(it) && it.action == "conflict" }
 
         // --- Phase 3: execute the planned operations. ---
         var uploaded = 0
@@ -189,10 +190,19 @@ class SaveSyncOrchestrator @Inject constructor(
                         if (fileName == null) {
                             skipped++
                         } else {
-                            saveRepository.uploadSaveFromDisk(
+                            val result = saveRepository.uploadSaveFromDisk(
                                 op.romId, ctx.slot, fileName, ctx.platformFsSlug, sessionId = neg.sessionId
                             )
                             uploaded++
+                            // Server now holds exactly what we just uploaded — record it
+                            // as the new common-ancestor baseline for future decisions.
+                            val baselineHash = result.contentHash ?: ctx.negotiatedContentHash
+                            if (baselineHash != null) {
+                                prefsStore.setSyncBaseline(
+                                    op.romId, ctx.slot,
+                                    SyncBaseline(baselineHash, result.saveId, msToIso(result.serverMs))
+                                )
+                            }
                         }
                     }
                     "download" -> {
@@ -222,12 +232,29 @@ class SaveSyncOrchestrator @Inject constructor(
                                     saveId, fileName, ctx.platformFsSlug, remoteMs, sessionId = neg.sessionId
                                 )
                                 downloaded++
+                                // Local file now matches what the server had — record
+                                // that as the new common-ancestor baseline.
+                                val baselineHash = op.serverContentHash
+                                    ?: saveRepository.localSaveStat(fileName, ctx.platformFsSlug)?.contentHash
+                                if (baselineHash != null) {
+                                    prefsStore.setSyncBaseline(
+                                        op.romId, ctx.slot,
+                                        SyncBaseline(baselineHash, saveId, op.serverUpdatedAt)
+                                    )
+                                }
                             }
                         }
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
+            } catch (_: SaveConflictException) {
+                // The server rejected this upload because the slot has moved since
+                // negotiate ran (another device won the race). Report it as a
+                // conflict for this ROM rather than a generic failure — the next
+                // refresh()'s determineSyncAction() will surface it for resolution
+                // rather than silently dropping the change.
+                conflicts++
             } catch (_: Exception) {
                 errors++
             }
