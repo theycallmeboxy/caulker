@@ -56,7 +56,10 @@ data class RomMetadataResponse(
 @JsonClass(generateAdapter = true)
 data class RomResponse(
     val id: Int,
-    val name: String,
+    // RomM's RomSchema.name is `str | None` — null for unmatched/manually-added
+    // ROMs that haven't been scraped. Fall back to a filename at the mapping
+    // boundary (see RomResponse.toEntity()), not here.
+    val name: String? = null,
     @Json(name = "fs_name") val fileName: String? = null,
     @Json(name = "fs_name_no_ext") val fileNameNoExt: String? = null,
     @Json(name = "fs_size_bytes") val fileSize: Long = 0,

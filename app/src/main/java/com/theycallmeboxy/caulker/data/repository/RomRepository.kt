@@ -490,7 +490,10 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
 
 private fun com.theycallmeboxy.caulker.data.api.model.RomResponse.toEntity() = RomEntity(
     id = id,
-    name = name,
+    // `name` is null for unmatched/manually-added ROMs (RomM's RomSchema.name
+    // is str | None). Fall back to a filename-derived display name so the rest
+    // of the app (RomEntity.name is non-null) never has to null-check this.
+    name = name ?: fileNameNoExt ?: fileName ?: "Unknown",
     fileName = fileName,
     fileNameNoExt = fileNameNoExt,
     fileSize = fileSize,
