@@ -9,12 +9,16 @@ import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 // data layer so the orchestrator doesn't have to import upward into UI code.
 enum class SyncAction { NONE, UPLOAD, DOWNLOAD, UP_TO_DATE, CONFLICT }
 
-// Mirrors RomM 4.9's server-side compare_save_state (hash-first): identical
-// content is a no-op regardless of timestamps, then last-synced tracking decides
-// direction / conflict, then a timestamp fallback. Passing the local and server
-// `content_hash` keeps this in-app verdict aligned with the server's
-// /sync/negotiate result, so a byte-identical save is never flagged for
-// upload/download the way a timestamp-only comparison would.
+// Mirrors RomM's server-side compare_save_state (backend/handler/sync/comparison.py)
+// exactly, aside from one deliberate deviation: a 2s tolerance on every ">"
+// comparison, to absorb FAT/SAF mtime rounding on Android storage (the server
+// compares with zero tolerance since its timestamps are its own database
+// values). Algorithm:
+//   1. Identical content-hash -> no-op regardless of timestamps.
+//   2. With last-synced history: which side changed since then decides the
+//      verdict (both -> conflict, one -> that direction, neither -> up to date).
+//   3. No history: timestamp comparison, with a same-timestamp-but-different-hash
+//      tie broken as a conflict (matching the server) rather than up to date.
 fun determineSyncAction(
     slot: SaveSlotResponse,
     hasLocalFile: Boolean,
@@ -34,26 +38,26 @@ fun determineSyncAction(
 
     val remoteMs = parseIsoToMs(slot.remoteUpdatedAt) ?: return SyncAction.UP_TO_DATE
 
-    if (deviceSync != null) {
-        val lastSyncedMs = parseIsoToMs(deviceSync.lastSyncedAt)
-        if (lastSyncedMs != null) {
-            val localChanged = localModifiedMs > lastSyncedMs + 2_000L
-            val remoteChanged = remoteMs > lastSyncedMs + 2_000L
-            if (localChanged && remoteChanged) return SyncAction.CONFLICT
-        }
-        if (deviceSync.isCurrent) {
-            return if (localModifiedMs > remoteMs + 2_000L) SyncAction.UPLOAD else SyncAction.UP_TO_DATE
+    val lastSyncedMs = deviceSync?.let { parseIsoToMs(it.lastSyncedAt) }
+    if (lastSyncedMs != null) {
+        val clientChanged = localModifiedMs > lastSyncedMs + 2_000L
+        val serverChanged = remoteMs > lastSyncedMs + 2_000L
+        return when {
+            clientChanged && serverChanged -> SyncAction.CONFLICT
+            clientChanged -> SyncAction.UPLOAD
+            serverChanged -> SyncAction.DOWNLOAD
+            else -> SyncAction.UP_TO_DATE
         }
     }
 
-    // No deviceSync, or isCurrent=false (another source uploaded since last sync).
-    // Apply a 2s tolerance only in the DOWNLOAD direction — clock skew from
-    // another device uploading is the real risk there. For UPLOAD, trust local
-    // being any amount newer: a file the emulator just saved should always win.
+    // No sync history: fall back to timestamp comparison.
     val diff = localModifiedMs - remoteMs
     return when {
-        diff > 0L -> SyncAction.UPLOAD
+        diff > 2_000L -> SyncAction.UPLOAD
         diff < -2_000L -> SyncAction.DOWNLOAD
+        // Same timestamp (within tolerance) but hashes are known to differ ->
+        // conflict, matching the server's tie-break.
+        localHash != remoteHash -> SyncAction.CONFLICT
         else -> SyncAction.UP_TO_DATE
     }
 }

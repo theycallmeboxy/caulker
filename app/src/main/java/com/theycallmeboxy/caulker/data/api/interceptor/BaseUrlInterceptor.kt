@@ -23,10 +23,16 @@ class BaseUrlInterceptor @Inject constructor(
             ?.toHttpUrlOrNull()
             ?: return chain.proceed(original)
 
+        // Prepend the configured server URL's own path so a RomM instance served
+        // under a sub-path (e.g. behind a reverse proxy at https://host/romm/)
+        // isn't silently dropped — Retrofit's requests are built against
+        // "http://localhost/api/..." with no path prefix of their own.
+        val basePath = serverUrl.encodedPath.trimEnd('/')
         val rewritten = original.url.newBuilder()
             .scheme(serverUrl.scheme)
             .host(serverUrl.host)
             .port(serverUrl.port)
+            .encodedPath(basePath + original.url.encodedPath)
             .build()
 
         return chain.proceed(original.newBuilder().url(rewritten).build())

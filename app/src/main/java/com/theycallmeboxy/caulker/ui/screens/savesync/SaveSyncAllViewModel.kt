@@ -13,6 +13,7 @@ import com.theycallmeboxy.caulker.data.sync.SyncAction
 import com.theycallmeboxy.caulker.data.sync.determineSyncAction
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -73,7 +74,10 @@ class SaveSyncAllViewModel @Inject constructor(
         .map { s ->
             when (s) {
                 is SaveSyncOverallState.Syncing ->
-                    "Syncing ${s.done + 1} of ${s.total}${s.currentRomName?.let { " — $it" } ?: ""}"
+                    if (s.total > 0)
+                        "Syncing ${s.done + 1} of ${s.total}${s.currentRomName?.let { " — $it" } ?: ""}"
+                    else
+                        "Preparing…${s.currentRomName?.let { " — $it" } ?: ""}"
                 is SaveSyncOverallState.Done ->
                     "Synced — uploaded ${s.uploaded}, downloaded ${s.downloaded}" +
                         (if (s.errors > 0) " (${s.errors} failed)" else "")
@@ -85,16 +89,25 @@ class SaveSyncAllViewModel @Inject constructor(
     init {
         refresh()
         // After the orchestrator finishes, repaint the rows so sync states reflect
-        // post-sync reality (mtime, hasRemote, etc.).
+        // post-sync reality (mtime, hasRemote, etc.). orchestratorState is a fresh
+        // StateFlow that replays its current value to every new subscriber — track
+        // the previous state so re-entering this screen right after a sync doesn't
+        // see a stale "Done" and trigger a redundant refresh.
         viewModelScope.launch {
+            var previous: SaveSyncOverallState = orchestratorState.value
             orchestratorState.collect { s ->
-                if (s is SaveSyncOverallState.Done) refresh()
+                val prev = previous
+                previous = s
+                if (s is SaveSyncOverallState.Done && prev !is SaveSyncOverallState.Done) refresh()
             }
         }
     }
 
+    private var refreshJob: Job? = null
+
     fun refresh() {
-        viewModelScope.launch {
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
             _isLoading.value = true
             _error.value = null
             try {
@@ -131,7 +144,7 @@ class SaveSyncAllViewModel @Inject constructor(
             // targeted server slot ("default" unless overridden).
             val target = prefsStore.saveSyncSlotPref(romId).first()
             val save = saveRepository.syncSavesForRom(romId)
-                .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == target }
+                .filter { it.slot == target }
                 .maxByOrNull { it.updatedAt ?: "" }
             val localFileName = saveRepository.resolveLocalSaveFileName(
                 save?.fileName, romFileName, platformFsSlug
@@ -196,7 +209,7 @@ class SaveSyncAllViewModel @Inject constructor(
         try {
             val slotKey = group.status.slot.slotKey
             val save = saveRepository.syncSavesForRom(group.romId)
-                .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == slotKey }
+                .filter { it.slot == slotKey }
                 .maxByOrNull { it.updatedAt ?: "" }
                 ?: return
             val remoteMs = parseIsoToMs(save.updatedAt)

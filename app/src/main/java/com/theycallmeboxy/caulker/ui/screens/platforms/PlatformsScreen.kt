@@ -102,7 +102,7 @@ fun PlatformsScreen(
                 }
             } else {
                 LazyColumn {
-                    items(platforms) { platform ->
+                    items(platforms, key = { it.id }) { platform ->
                         ListItem(
                             headlineContent = { Text(platform.name) },
                             supportingContent = { Text("${platform.romCount} games") },

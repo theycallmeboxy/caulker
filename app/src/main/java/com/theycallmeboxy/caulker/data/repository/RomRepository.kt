@@ -14,17 +14,21 @@ import com.theycallmeboxy.caulker.data.prefs.PlatformOverride
 import com.theycallmeboxy.caulker.data.prefs.PlatformOverrideMode
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.coroutines.coroutineContext
 
 private const val ROM_PAGE_SIZE = 500
 
@@ -42,8 +46,6 @@ class RomRepository @Inject constructor(
     fun observeByIds(ids: List<Int>): Flow<List<RomEntity>> = dao.observeByIds(ids)
 
     suspend fun getById(id: Int): RomEntity? = dao.getById(id)
-
-    suspend fun getRomIdsWithSaves(): List<Int> = dao.getIdsWithSaves()
 
     private fun defaultRomFile(basePath: String, platformFsSlug: String?, fileName: String): File =
         if (!platformFsSlug.isNullOrBlank()) File(basePath, "$platformFsSlug/$fileName")
@@ -307,31 +309,42 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
         val perFileTotal = body.contentLength().takeIf { it > 0 } ?: contentLength
         val total = if (progressTotalBytes > 0) progressTotalBytes else perFileTotal
         var bytesRead = 0L
-        // A stalled socket read blocks the IO thread and can't be interrupted by
-        // cooperative coroutine cancellation — so a hung download would ignore
-        // "Cancel" until the 120s read timeout. Closing the response body from the
-        // cancellation callback makes the blocking read() throw at once.
-        val cancelHandle = coroutineContext[Job]?.invokeOnCompletion {
-            try { body.close() } catch (_: Throwable) {}
-        }
         try {
-            body.byteStream().use { input ->
-                destFile.outputStream().use { output ->
-                    val buffer = ByteArray(8192)
-                    var bytes: Int
-                    while (input.read(buffer).also { bytes = it } != -1) {
-                        output.write(buffer, 0, bytes)
-                        bytesRead += bytes
-                        emitter.emit(DownloadProgress.InProgress(progressOffsetBytes + bytesRead, total))
+            coroutineScope {
+                // A stalled socket read blocks the IO thread and can't be interrupted
+                // by cooperative coroutine cancellation. invokeOnCompletion only fires
+                // once a job reaches a *final* state, which never happens while it's
+                // blocked in that read — so it can't abort a hung transfer. A sibling
+                // watcher coroutine that closes the body the instant cancellation
+                // begins does: closing the stream makes the blocked read() throw
+                // immediately.
+                val watcher = launch { try { awaitCancellation() } finally { body.close() } }
+                try {
+                    body.byteStream().use { input ->
+                        destFile.outputStream().use { output ->
+                            val buffer = ByteArray(8192)
+                            var bytes: Int
+                            while (input.read(buffer).also { bytes = it } != -1) {
+                                output.write(buffer, 0, bytes)
+                                bytesRead += bytes
+                                emitter.emit(DownloadProgress.InProgress(progressOffsetBytes + bytesRead, total))
+                            }
+                        }
                     }
+                } finally {
+                    watcher.cancel()
                 }
             }
+        } catch (e: CancellationException) {
+            destFile.delete()
+            throw e
         } catch (e: Exception) {
             destFile.delete()
+            // If cancellation caused the read to throw (via the watcher closing the
+            // body), rethrow CancellationException instead of reporting a failure.
+            currentCoroutineContext().ensureActive()
             emitter.emit(DownloadProgress.Failed("${e.javaClass.simpleName}: ${e.message ?: "unknown"} — path: ${destFile.absolutePath}"))
             return false
-        } finally {
-            cancelHandle?.dispose()
         }
         return true
     }
@@ -438,29 +451,37 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
 
         val totalBytes = body.contentLength()
         var bytesRead = 0L
-        // Close the body on cancellation so a stalled blocking read() aborts at
-        // once instead of hanging until the read timeout (see downloadSingleFile).
-        val cancelHandle = coroutineContext[Job]?.invokeOnCompletion {
-            try { body.close() } catch (_: Throwable) {}
-        }
         try {
-            body.byteStream().use { input ->
-                destFile.outputStream().use { output ->
-                    val buffer = ByteArray(8192)
-                    var bytes: Int
-                    while (input.read(buffer).also { bytes = it } != -1) {
-                        output.write(buffer, 0, bytes)
-                        bytesRead += bytes
-                        emit(DownloadProgress.InProgress(bytesRead, totalBytes))
+            // See downloadSingleFile for why this needs a watcher coroutine rather
+            // than invokeOnCompletion to abort a stalled blocking read() on cancel.
+            coroutineScope {
+                val watcher = launch { try { awaitCancellation() } finally { body.close() } }
+                try {
+                    body.byteStream().use { input ->
+                        destFile.outputStream().use { output ->
+                            val buffer = ByteArray(8192)
+                            var bytes: Int
+                            while (input.read(buffer).also { bytes = it } != -1) {
+                                output.write(buffer, 0, bytes)
+                                bytesRead += bytes
+                                emit(DownloadProgress.InProgress(bytesRead, totalBytes))
+                            }
+                        }
                     }
+                } finally {
+                    watcher.cancel()
                 }
             }
+        } catch (e: CancellationException) {
+            destFile.delete()
+            throw e
         } catch (e: Exception) {
             destFile.delete()
+            // If cancellation caused the read to throw (via the watcher closing the
+            // body), rethrow CancellationException instead of reporting a failure.
+            currentCoroutineContext().ensureActive()
             emit(DownloadProgress.Failed("${e.javaClass.simpleName}: ${e.message ?: "unknown"} — path: ${destFile.absolutePath}"))
             return@flow
-        } finally {
-            cancelHandle?.dispose()
         }
 
         emit(DownloadProgress.Done(destFile))
@@ -478,13 +499,14 @@ private fun com.theycallmeboxy.caulker.data.api.model.RomResponse.toEntity() = R
     platformFsSlug = platformFsSlug,
     slug = slug,
     summary = summary,
-    rating = rating,
-    firstReleaseDate = firstReleaseDate,
-    genres = genres.joinToString(","),
+    // rating/genres/release date live under `metadatum` server-side, not at the
+    // response's top level.
+    rating = metadatum?.averageRating,
+    firstReleaseDate = metadatum?.firstReleaseDate,
+    genres = (metadatum?.genres ?: emptyList()).joinToString(","),
     regions = regions.joinToString(","),
     languages = languages.joinToString(","),
     coverPath = coverPath,
-    hasSaves = hasSaves,
     crcHash = crcHash,
     md5Hash = md5Hash,
     sha1Hash = sha1Hash,

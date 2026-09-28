@@ -29,8 +29,7 @@ data class HeartbeatMetadataSources(
 data class UserResponse(
     val id: Int,
     val username: String,
-    val role: String,
-    val avatar: String? = null
+    val role: String
 )
 
 @JsonClass(generateAdapter = true)
@@ -41,9 +40,17 @@ data class PlatformResponse(
     @Json(name = "fs_slug") val fsSlug: String? = null,
     @Json(name = "rom_count") val romCount: Int = 0,
     @Json(name = "firmware_count") val firmwareCount: Int = 0,
-    @Json(name = "logo_path") val logoPath: String? = null,
     @Json(name = "created_at") val createdAt: String? = null,
     @Json(name = "updated_at") val updatedAt: String? = null
+)
+
+// Rating/genres/release date live under the rom's `metadatum` object server-side
+// (RomM's RomMetadataSchema), not at the top level of the rom response.
+@JsonClass(generateAdapter = true)
+data class RomMetadataResponse(
+    val genres: List<String> = emptyList(),
+    @Json(name = "first_release_date") val firstReleaseDate: Long? = null,
+    @Json(name = "average_rating") val averageRating: Float? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -58,13 +65,10 @@ data class RomResponse(
     @Json(name = "platform_fs_slug") val platformFsSlug: String? = null,
     val slug: String? = null,
     val summary: String? = null,
-    val rating: Float? = null,
-    @Json(name = "first_release_date") val firstReleaseDate: Long? = null,
-    val genres: List<String> = emptyList(),
+    val metadatum: RomMetadataResponse? = null,
     val regions: List<String> = emptyList(),
     val languages: List<String> = emptyList(),
     @Json(name = "path_cover_small") val coverPath: String? = null,
-    @Json(name = "has_saves") val hasSaves: Boolean = false,
     @Json(name = "crc_hash") val crcHash: String? = null,
     @Json(name = "md5_hash") val md5Hash: String? = null,
     @Json(name = "sha1_hash") val sha1Hash: String? = null,
@@ -147,28 +151,19 @@ data class SaveResponse(
 data class SaveSlotResponse(
     val slot: String? = null,
     val emulator: String? = null,
-    @Json(name = "has_local") val hasLocal: Boolean = false,
     @Json(name = "has_remote") val hasRemote: Boolean = false,
-    @Json(name = "local_updated_at") val localUpdatedAt: String? = null,
     @Json(name = "remote_updated_at") val remoteUpdatedAt: String? = null
 ) {
     val slotKey: String get() = slot?.takeIf { it.isNotBlank() } ?: "default"
-    val slotDisplay: String get() = when {
-        slot.isNullOrBlank() || slot == "default" || slot == "0" -> "Default"
-        slot.toIntOrNull() != null -> "Slot $slot"
-        else -> slot.replaceFirstChar { it.uppercaseChar() }
-    }
 }
 
+// Response to POST /api/devices (device registration). The list/update/delete
+// device endpoints return a differently-shaped DeviceSchema (id, not device_id)
+// that Caulker doesn't call, so this only needs to match the create response.
 @JsonClass(generateAdapter = true)
 data class DeviceResponse(
     @Json(name = "device_id") val id: String,
     val name: String? = null,
-    val platform: String? = null,
-    val client: String = "caulker",
-    @Json(name = "client_version") val clientVersion: String? = null,
-    @Json(name = "sync_mode") val syncMode: String? = null,
-    @Json(name = "sync_enabled") val syncEnabled: Boolean = true,
     @Json(name = "created_at") val createdAt: String? = null
 )
 
@@ -186,12 +181,11 @@ data class RegisterDeviceRequest(
 @JsonClass(generateAdapter = true)
 data class FirmwareResponse(
     val id: Int,
-    @Json(name = "platform_id") val platformId: Int? = null,
     @Json(name = "file_name") val fileName: String,
     @Json(name = "file_size_bytes") val fileSize: Long = 0,
-    val crc: String? = null,
-    val md5: String? = null,
-    val sha1: String? = null,
+    @Json(name = "crc_hash") val crc: String? = null,
+    @Json(name = "md5_hash") val md5: String? = null,
+    @Json(name = "sha1_hash") val sha1: String? = null,
     @Json(name = "updated_at") val updatedAt: String? = null
 )
 

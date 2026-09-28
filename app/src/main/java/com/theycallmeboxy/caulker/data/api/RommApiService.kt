@@ -38,7 +38,6 @@ interface RommApiService {
         @Query("collection_id") collectionId: Int? = null,
         @Query("virtual_collection_id") virtualCollectionId: String? = null,
         @Query("smart_collection_id") smartCollectionId: Int? = null,
-        @Query("search") search: String? = null,
         @Query("offset") offset: Int = 0,
         @Query("limit") limit: Int = 50,
         @Query("order_by") orderBy: String? = null,
@@ -48,16 +47,6 @@ interface RommApiService {
 
     @GET("api/roms/{id}")
     suspend fun getRom(@Path("id") id: Int): RomResponse
-
-    @GET("api/roms/identifiers")
-    suspend fun getRomIdentifiers(): List<Int>
-
-    @GET("api/roms/by-hash")
-    suspend fun getRomByHash(
-        @Query("crc_hash") crcHash: String? = null,
-        @Query("md5_hash") md5Hash: String? = null,
-        @Query("sha1_hash") sha1Hash: String? = null
-    ): RomResponse
 
     // --- Collections ---
 
@@ -70,9 +59,6 @@ interface RommApiService {
     suspend fun getSmartCollections(
         @Query("updated_after") updatedAfter: String? = null
     ): List<CollectionResponse>
-
-    @GET("api/collections/identifiers")
-    suspend fun getCollectionIdentifiers(): List<Int>
 
     // `type` is required server-side (e.g. "genre", "franchise"); "all" returns
     // every type. Omitting it returns HTTP 422.
@@ -135,13 +121,6 @@ interface RommApiService {
         @Part saveFile: MultipartBody.Part
     ): SaveResponse
 
-    @Multipart
-    @PUT("api/saves/{id}")
-    suspend fun updateSave(
-        @Path("id") id: Int,
-        @Part saveFile: MultipartBody.Part
-    ): SaveResponse
-
     // --- Save sync engine (RomM 4.9) ---
 
     @POST("api/sync/negotiate")
@@ -153,28 +132,10 @@ interface RommApiService {
         @Body request: SyncCompleteRequest
     ): SyncCompleteResponse
 
-    @GET("api/sync/sessions")
-    suspend fun getSyncSessions(
-        @Query("device_id") deviceId: String? = null,
-        @Query("limit") limit: Int = 50
-    ): List<SyncSessionResponse>
-
     // --- Devices ---
-
-    @GET("api/devices")
-    suspend fun getDevices(): List<DeviceResponse>
 
     @POST("api/devices")
     suspend fun registerDevice(@Body request: RegisterDeviceRequest): DeviceResponse
-
-    @PUT("api/devices/{id}")
-    suspend fun updateDevice(
-        @Path("id") id: String,
-        @Body request: Map<String, @JvmSuppressWildcards Any>
-    ): DeviceResponse
-
-    @DELETE("api/devices/{id}")
-    suspend fun deleteDevice(@Path("id") id: String): Response<Unit>
 
     // --- Firmware ---
 

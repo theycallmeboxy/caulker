@@ -76,6 +76,19 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
         prefs[Keys.SAVE_SYNC_ENROLLED] = serializeEnrolled(current - romId)
     }
 
+    // Batched variants for bulk selection actions — one read-modify-write instead
+    // of one per ROM (enrolling hundreds of games would otherwise mean hundreds
+    // of DataStore edits/fsyncs).
+    suspend fun enrollAllInSaveSync(romIds: Collection<Int>) = context.dataStore.edit { prefs ->
+        val current = parseEnrolled(prefs[Keys.SAVE_SYNC_ENROLLED])
+        prefs[Keys.SAVE_SYNC_ENROLLED] = serializeEnrolled(current + romIds)
+    }
+
+    suspend fun unenrollAllFromSaveSync(romIds: Collection<Int>) = context.dataStore.edit { prefs ->
+        val current = parseEnrolled(prefs[Keys.SAVE_SYNC_ENROLLED])
+        prefs[Keys.SAVE_SYNC_ENROLLED] = serializeEnrolled(current - romIds)
+    }
+
     private fun parseEnrolled(json: String?): Set<Int> {
         json ?: return emptySet()
         return try {

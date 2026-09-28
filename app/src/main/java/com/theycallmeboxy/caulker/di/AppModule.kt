@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import com.theycallmeboxy.caulker.BuildConfig
 import com.theycallmeboxy.caulker.data.api.RommApiService
 import com.theycallmeboxy.caulker.data.api.TlsConfig
 import com.theycallmeboxy.caulker.data.api.interceptor.AuthInterceptor
@@ -48,9 +49,15 @@ object AppModule {
         val builder = OkHttpClient.Builder()
             .addInterceptor(baseUrlInterceptor)
             .addInterceptor(authInterceptor)
-            .addInterceptor(HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.BASIC
-            })
+            .apply {
+                // Every request/response line (URLs included) would otherwise land
+                // in logcat on release builds too.
+                if (BuildConfig.DEBUG) {
+                    addInterceptor(HttpLoggingInterceptor().apply {
+                        level = HttpLoggingInterceptor.Level.BASIC
+                    })
+                }
+            }
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
             .writeTimeout(120, TimeUnit.SECONDS)

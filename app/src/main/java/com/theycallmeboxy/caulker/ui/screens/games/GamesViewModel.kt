@@ -200,13 +200,13 @@ class GamesViewModel @Inject constructor(
     fun enrollSelected() {
         val ids = _selectedIds.value.toList()
         exitSelection()
-        viewModelScope.launch { ids.forEach { prefsStore.enrollInSaveSync(it) } }
+        viewModelScope.launch { prefsStore.enrollAllInSaveSync(ids) }
     }
 
     fun unenrollSelected() {
         val ids = _selectedIds.value.toList()
         exitSelection()
-        viewModelScope.launch { ids.forEach { prefsStore.unenrollFromSaveSync(it) } }
+        viewModelScope.launch { prefsStore.unenrollAllFromSaveSync(ids) }
     }
 
     fun cancelDownload() = downloadOrchestrator.cancel()

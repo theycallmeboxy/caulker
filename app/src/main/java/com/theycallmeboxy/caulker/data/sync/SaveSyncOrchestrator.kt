@@ -89,19 +89,25 @@ class SaveSyncOrchestrator @Inject constructor(
             val deviceId = saveRepository.getOrRegisterDeviceId()
 
             // --- Phase 1: gather local save state for each enrolled ROM. ---
-            _state.value = SaveSyncOverallState.Syncing(done = 0, total = enrolled.size)
+            // The real total isn't known until negotiate returns the actionable set
+            // (phase 3), so this phase reports total=0 as a "preparing" sentinel
+            // rather than enrolled.size, which would otherwise visibly jump down
+            // once the real (typically smaller) actionable count is known.
+            _state.value = SaveSyncOverallState.Syncing(done = 0, total = 0)
             val ctxByRom = HashMap<Int, RomCtx>()
             val clientSaves = ArrayList<ClientSaveState>()
 
             enrolled.forEachIndexed { index, romId ->
                 val rom = romRepository.getById(romId) ?: return@forEachIndexed
                 _state.value = SaveSyncOverallState.Syncing(
-                    done = index, total = enrolled.size, currentRomId = romId, currentRomName = rom.name
+                    done = 0, total = 0, currentRomId = romId, currentRomName = rom.name
                 )
                 val slot = prefsStore.saveSyncSlotPref(rom.id).first()
                 val serverSaves = try { saveRepository.syncSavesForRom(rom.id) } catch (_: Exception) { emptyList() }
+                // Strict (rom_id, slot) match, mirroring server negotiate pairing —
+                // a null-slot save is archival and never pairs against a named slot.
                 val serverSave = serverSaves
-                    .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == slot }
+                    .filter { it.slot == slot }
                     .maxByOrNull { it.updatedAt ?: "" }
                 val localFileName = saveRepository.resolveLocalSaveFileName(
                     serverSave?.fileName, rom.fileName, rom.platformFsSlug
@@ -138,7 +144,7 @@ class SaveSyncOrchestrator @Inject constructor(
             fun matchesEnrolledSlot(op: SyncOperation): Boolean {
                 if (op.romId !in enrolledSet) return false
                 val ctxSlot = ctxByRom[op.romId]?.slot ?: "default"
-                return (op.slot ?: "default") == ctxSlot
+                return op.slot == ctxSlot
             }
 
             val actionable = neg.operations.filter {

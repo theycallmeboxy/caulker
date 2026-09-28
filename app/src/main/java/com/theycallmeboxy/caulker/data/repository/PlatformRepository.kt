@@ -32,7 +32,6 @@ class PlatformRepository @Inject constructor(
                 fsSlug = it.fsSlug,
                 romCount = it.romCount,
                 firmwareCount = it.firmwareCount,
-                logoPath = it.logoPath,
                 updatedAt = it.updatedAt
             )
         })

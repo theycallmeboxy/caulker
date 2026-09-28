@@ -52,9 +52,6 @@ interface RomDao {
     @Query("DELETE FROM roms WHERE platformId = :platformId")
     suspend fun deleteByPlatform(platformId: Int)
 
-    @Query("SELECT id FROM roms WHERE hasSaves = 1")
-    suspend fun getIdsWithSaves(): List<Int>
-
     @Query("SELECT id FROM roms")
     suspend fun getAllIds(): List<Int>
 
@@ -102,17 +99,10 @@ interface CollectionDao {
     suspend fun deleteAll()
 }
 
+// The "saves" table is currently unused — Caulker treats RomM as the source of
+// truth for save state and never reads a local cache of it (see
+// SaveRepository.syncSavesForRom). Kept as an empty DAO + entity rather than
+// dropped outright, since removing the entity would bump the Room schema
+// version; a real removal is a candidate for a future migration.
 @Dao
-interface SaveDao {
-    @Query("SELECT * FROM saves WHERE romId = :romId")
-    fun observeByRom(romId: Int): Flow<List<SaveEntity>>
-
-    @Query("SELECT * FROM saves WHERE romId = :romId")
-    suspend fun getByRom(romId: Int): List<SaveEntity>
-
-    @Upsert
-    suspend fun upsertAll(saves: List<SaveEntity>)
-
-    @Query("DELETE FROM saves WHERE romId = :romId")
-    suspend fun deleteByRom(romId: Int)
-}
+interface SaveDao

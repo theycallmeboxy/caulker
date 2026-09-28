@@ -101,7 +101,7 @@ class SaveSyncTileService : TileService() {
             is SaveSyncOverallState.Syncing -> {
                 tile.state = Tile.STATE_ACTIVE
                 tile.label = "Syncing saves"
-                tile.subtitle = "${state.done + 1} / ${state.total}"
+                tile.subtitle = if (state.total > 0) "${state.done + 1} / ${state.total}" else "Preparing…"
             }
             is SaveSyncOverallState.Done -> {
                 tile.state = Tile.STATE_INACTIVE

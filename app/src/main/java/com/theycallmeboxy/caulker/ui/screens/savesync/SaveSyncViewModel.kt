@@ -12,6 +12,7 @@ import com.theycallmeboxy.caulker.data.sync.SyncAction
 import com.theycallmeboxy.caulker.data.sync.determineSyncAction
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -81,8 +82,11 @@ class SaveSyncViewModel @Inject constructor(
         }
     }
 
+    private var loadJob: Job? = null
+
     fun loadStatus() {
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _isLoading.value = true
             _error.value = null
             try {
@@ -90,14 +94,17 @@ class SaveSyncViewModel @Inject constructor(
                 val target = prefsStore.saveSyncSlotPref(romId).first()
 
                 val saves = saveRepository.syncSavesForRom(romId)
+                // Server negotiate pairs on the exact (rom_id, slot); a null slot is
+                // archival and never offered/paired against, so mirror that here
+                // instead of folding it into "default".
                 _serverSlots.value = saves
-                    .map { it.slot?.takeIf { s -> s.isNotBlank() } ?: "default" }
+                    .mapNotNull { it.slot?.takeIf { s -> s.isNotBlank() } }
                     .distinct()
                     .sorted()
 
                 // The server save for the targeted slot (newest wins if duplicated).
                 val save = saves
-                    .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == target }
+                    .filter { it.slot == target }
                     .maxByOrNull { it.updatedAt ?: "" }
 
                 // The single physical local file for this ROM. Resolve from the
@@ -150,6 +157,9 @@ class SaveSyncViewModel @Inject constructor(
     }
 
     fun unenrollFromSaveSync() {
+        // Cancel any in-flight load so it can't repopulate _status after this
+        // clears it (e.g. a load kicked off by enroll racing a quick disable).
+        loadJob?.cancel()
         viewModelScope.launch {
             prefsStore.unenrollFromSaveSync(romId)
             _status.value = null
@@ -214,7 +224,7 @@ class SaveSyncViewModel @Inject constructor(
             setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
                 val save = saveRepository.syncSavesForRom(romId)
-                    .filter { (it.slot?.takeIf { s -> s.isNotBlank() } ?: "default") == slotKey }
+                    .filter { it.slot == slotKey }
                     .maxByOrNull { it.updatedAt ?: "" }
                     ?: error("Save not found on server for slot $slotKey")
                 val remoteMs = parseIsoToMs(save.updatedAt)

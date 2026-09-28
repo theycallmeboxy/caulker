@@ -36,7 +36,7 @@ class SaveSyncForegroundService : android.app.Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             orchestrator.cancel()
-            stopAndCleanup()
+            stopAndCleanup(removeNotification = true)
             return START_NOT_STICKY
         }
 
@@ -60,8 +60,10 @@ class SaveSyncForegroundService : android.app.Service() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         when (state) {
             is SaveSyncOverallState.Syncing -> {
-                val label = "Syncing ${state.done + 1} of ${state.total}" +
-                    (state.currentRomName?.let { " — $it" } ?: "")
+                val label = if (state.total > 0)
+                    "Syncing ${state.done + 1} of ${state.total}" + (state.currentRomName?.let { " — $it" } ?: "")
+                else
+                    "Preparing…" + (state.currentRomName?.let { " — $it" } ?: "")
                 nm.notify(
                     NotificationChannels.SAVE_SYNC_NOTIFICATION_ID,
                     buildNotification(
@@ -101,18 +103,18 @@ class SaveSyncForegroundService : android.app.Service() {
         }
     }
 
-    private fun stopAndCleanup() {
+    // removeNotification=true dismisses the notification (user tapped Cancel);
+    // false detaches it so the final Done/Failed notification stays in the shade.
+    private fun stopAndCleanup(removeNotification: Boolean = false) {
         observerJob?.cancel()
         observerJob = null
         scope?.cancel()
         scope = null
-        // Keep the final notification visible after the service stops by detaching
-        // it from foreground state rather than removing it entirely.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_DETACH)
+            stopForeground(if (removeNotification) STOP_FOREGROUND_REMOVE else STOP_FOREGROUND_DETACH)
         } else {
             @Suppress("DEPRECATION")
-            stopForeground(false)
+            stopForeground(removeNotification)
         }
         stopSelf()
     }

@@ -11,8 +11,6 @@ import com.theycallmeboxy.caulker.data.api.model.SaveResponse
 import com.theycallmeboxy.caulker.data.api.model.SyncCompleteRequest
 import com.theycallmeboxy.caulker.data.api.model.SyncNegotiateRequest
 import com.theycallmeboxy.caulker.data.api.model.SyncNegotiateResponse
-import com.theycallmeboxy.caulker.data.db.dao.SaveDao
-import com.theycallmeboxy.caulker.data.db.entity.SaveEntity
 import com.theycallmeboxy.caulker.data.prefs.PlatformOverrideMode
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import com.theycallmeboxy.caulker.data.util.RootFileHelper
@@ -21,7 +19,6 @@ import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 import retrofit2.HttpException
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -39,13 +36,10 @@ data class LocalSaveStat(val contentHash: String, val sizeBytes: Long, val modif
 @Singleton
 class SaveRepository @Inject constructor(
     private val api: RommApiService,
-    private val dao: SaveDao,
     private val prefsStore: PrefsStore,
     private val rootHelper: RootFileHelper,
     @ApplicationContext private val context: Context
 ) {
-    fun observeSavesForRom(romId: Int): Flow<List<SaveEntity>> = dao.observeByRom(romId)
-
     suspend fun getOrRegisterDeviceId(): String {
         val existing = prefsStore.deviceId.first()
         if (!existing.isNullOrBlank()) return existing
@@ -195,19 +189,6 @@ class SaveRepository @Inject constructor(
         return serverMs
     }
 
-    // Uploads save bytes from an arbitrary source (e.g., file picker). Returns the server's
-    // updatedAt as epoch ms (or current time if the server timestamp can't be parsed).
-    suspend fun uploadSaveFromBytes(
-        romId: Int,
-        slotKey: String,
-        fileName: String,
-        data: ByteArray
-    ): Long {
-        val deviceId = getOrRegisterDeviceId()
-        val saved = uploadBytes(romId, slotKey, fileName, deviceId, data)
-        return parseIsoToMs(saved.updatedAt) ?: System.currentTimeMillis()
-    }
-
     // Uploads via POST /api/saves. In RomM 4.9, slot uploads are datetime-tagged
     // server-side into per-slot history; identical content (matching content_hash)
     // is de-duplicated, and autocleanup trims the slot to the most recent N. The
@@ -289,26 +270,6 @@ class SaveRepository @Inject constructor(
         return BackupInfo(timestamps.size, timestamps.firstOrNull() ?: 0L)
     }
 
-    suspend fun getByRom(romId: Int) = dao.getByRom(romId)
-
-    suspend fun getSaveBySlot(romId: Int, slotKey: String) =
-        dao.getByRom(romId).filter { it.slot == slotKey }.maxByOrNull { it.updatedAt ?: "" }
-
-    // Fetches all saves for this ROM from all devices, stores in DB, and returns the raw responses.
-    suspend fun syncSavesForRom(romId: Int): List<SaveResponse> {
-        val remote = api.getSaves(romId = romId)
-        dao.upsertAll(remote.map {
-            SaveEntity(
-                id = it.id,
-                romId = it.romId,
-                deviceId = it.deviceId ?: it.originDeviceId,
-                slot = it.slot?.takeIf { s -> s.isNotBlank() } ?: "default",
-                emulator = it.emulator,
-                fileName = it.fileName,
-                fileSize = it.fileSize,
-                updatedAt = it.updatedAt
-            )
-        })
-        return remote
-    }
+    // Fetches all saves for this ROM from all devices.
+    suspend fun syncSavesForRom(romId: Int): List<SaveResponse> = api.getSaves(romId = romId)
 }
