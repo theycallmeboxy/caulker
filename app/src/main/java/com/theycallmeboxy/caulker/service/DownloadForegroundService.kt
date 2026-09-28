@@ -93,8 +93,11 @@ class DownloadForegroundService : android.app.Service() {
             BulkDownloadState.Idle -> {
                 // StateFlow replays its current value on collection. Only stop once
                 // the orchestrator is genuinely idle (finished or cancelled), not
-                // in the brief window before it sets Downloading.
-                if (!orchestrator.isRunning()) stopAndCleanup()
+                // in the brief window before it sets Downloading. Idle is only ever
+                // set on cancellation (completion goes through Done/Error), so this
+                // is always a cancel — remove the notification rather than leaving
+                // a stale one behind.
+                if (!orchestrator.isRunning()) stopAndCleanup(removeNotification = true)
             }
         }
     }

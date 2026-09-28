@@ -254,6 +254,7 @@ class SaveSyncViewModel @Inject constructor(
                 saveRepository.downloadSave(save.id, localFileName, platformFsSlug, remoteMs)
                 val newLocalMs = saveRepository.localSaveModifiedMs(localFileName, platformFsSlug)
                 val newLocalPath = saveRepository.getLocalFilePath(localFileName, platformFsSlug)
+                val newBackupInfo = saveRepository.getBackupInfo(localFileName, platformFsSlug)
                 setStatus {
                     it.copy(
                         isSyncing = false,
@@ -263,7 +264,8 @@ class SaveSyncViewModel @Inject constructor(
                         message = "Downloaded $localFileName",
                         isError = false,
                         fileName = localFileName,
-                        localFilePath = newLocalPath
+                        localFilePath = newLocalPath,
+                        backupInfo = newBackupInfo
                     )
                 }
             } catch (e: Exception) {
@@ -288,6 +290,7 @@ class SaveSyncViewModel @Inject constructor(
             setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
                 val serverMs = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug, overwrite = overwrite)
+                val newBackupInfo = saveRepository.getBackupInfo(fileName, platformFsSlug)
                 setStatus {
                     it.copy(
                         isSyncing = false,
@@ -296,6 +299,7 @@ class SaveSyncViewModel @Inject constructor(
                         syncAction = SyncAction.UP_TO_DATE,
                         message = "Uploaded $fileName",
                         isError = false,
+                        backupInfo = newBackupInfo,
                         slot = it.slot.copy(
                             hasRemote = true,
                             remoteUpdatedAt = java.time.Instant.ofEpochMilli(serverMs).toString()

@@ -270,6 +270,14 @@ class SaveRepository @Inject constructor(
         return BackupInfo(timestamps.size, timestamps.firstOrNull() ?: 0L)
     }
 
-    // Fetches all saves for this ROM from all devices.
-    suspend fun syncSavesForRom(romId: Int): List<SaveResponse> = api.getSaves(romId = romId)
+    // Fetches all saves for this ROM from all devices. Passes this device's id so
+    // the server populates each save's device_syncs with this device's
+    // last-synced history — RomM 5.3.1 only fills device_syncs for a device-scoped
+    // caller, and determineSyncAction()'s last-synced branch (data/sync/SyncAction.kt)
+    // depends on it to distinguish genuine conflicts from plain upload/download.
+    // Falls back to an unscoped call if no device id is registered yet.
+    suspend fun syncSavesForRom(romId: Int): List<SaveResponse> {
+        val deviceId = try { getOrRegisterDeviceId() } catch (_: Exception) { null }
+        return api.getSaves(romId = romId, deviceId = deviceId)
+    }
 }
