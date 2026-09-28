@@ -42,7 +42,16 @@ interface RommApiService {
         @Query("limit") limit: Int = 50,
         @Query("order_by") orderBy: String? = null,
         @Query("order_dir") orderDir: String? = null,
-        @Query("updated_after") updatedAfter: String? = null
+        @Query("updated_after") updatedAfter: String? = null,
+        // RomM 5.3.1 defaults these three to true and does extra server-side work
+        // (char index / filter-value / rom-id-index sidecars) for fields
+        // RomPageResponse below doesn't map, so Caulker never reads them — send
+        // false to skip that work. Unknown/false query params are harmless on
+        // older RomM (FastAPI ignores query params a route doesn't declare), so
+        // this is backward-compatible with 5.0.
+        @Query("with_char_index") withCharIndex: Boolean = false,
+        @Query("with_filter_values") withFilterValues: Boolean = false,
+        @Query("with_rom_id_index") withRomIdIndex: Boolean = false
     ): RomPageResponse
 
     @GET("api/roms/{id}")

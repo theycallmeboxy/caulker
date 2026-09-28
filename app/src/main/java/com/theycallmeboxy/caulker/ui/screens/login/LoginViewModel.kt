@@ -1,12 +1,17 @@
 package com.theycallmeboxy.caulker.ui.screens.login
 
+import android.content.Context
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.theycallmeboxy.caulker.data.api.REQUIRED_TOKEN_SCOPES
 import com.theycallmeboxy.caulker.data.api.RommApiService
 import com.theycallmeboxy.caulker.data.api.TlsConfig
+import com.theycallmeboxy.caulker.data.api.missingRequiredScopes
 import com.theycallmeboxy.caulker.data.api.model.ExchangeCodeRequest
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,7 +35,8 @@ data class LoginState(
 class LoginViewModel @Inject constructor(
     private val api: RommApiService,
     private val prefsStore: PrefsStore,
-    private val tlsConfig: TlsConfig
+    private val tlsConfig: TlsConfig,
+    @ApplicationContext private val appContext: Context
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(LoginState())
@@ -69,10 +75,27 @@ class LoginViewModel @Inject constructor(
                 prefsStore.setAuthToken(token.accessToken)
                 val user = api.getCurrentUser()
                 prefsStore.setUsername(user.username)
+                warnIfScopesMissing(token.scopes)
                 _state.value = LoginState(success = true)
             } catch (e: Exception) {
                 _state.value = LoginState(error = friendlyError(e))
             }
         }
+    }
+
+    // Non-blocking: RomM 5.3.1's exchange response carries the pairing token's
+    // granted scopes, so a scope gap can be caught right after pairing instead
+    // of surfacing later as a confusing 403 during save sync. Older servers
+    // that don't expose scopes just skip the check (missingRequiredScopes
+    // treats a null list as "unknown", not "missing").
+    private fun warnIfScopesMissing(tokenScopes: List<String>?) {
+        val missing = missingRequiredScopes(tokenScopes)
+        if (missing.isEmpty()) return
+        Toast.makeText(
+            appContext,
+            "Pairing token is missing: ${missing.joinToString(", ")}. " +
+                "Create a new pairing code with: ${REQUIRED_TOKEN_SCOPES.joinToString(", ")}",
+            Toast.LENGTH_LONG
+        ).show()
     }
 }

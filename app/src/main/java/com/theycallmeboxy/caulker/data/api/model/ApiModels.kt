@@ -205,7 +205,10 @@ data class ExchangeCodeRequest(
 @JsonClass(generateAdapter = true)
 data class TokenResponse(
     @Json(name = "raw_token") val accessToken: String,
-    @Json(name = "token_type") val tokenType: String = "bearer"
+    @Json(name = "token_type") val tokenType: String = "bearer",
+    // RomM 5.3.1's ClientTokenCreateSchema includes the token's granted scopes;
+    // null on servers whose exchange response doesn't expose them.
+    val scopes: List<String>? = null
 )
 
 // --- Save sync engine (RomM 4.9) ---
@@ -227,6 +230,12 @@ data class ClientSaveState(
 @JsonClass(generateAdapter = true)
 data class SyncNegotiateRequest(
     @Json(name = "device_id") val deviceId: String,
+    // RomM 5.3.1 optional scope: when set, downloads are offered only for these
+    // ROMs (plus any ROM `saves` below references). Omitted on older servers'
+    // pydantic models this just doesn't exist on, and RomM's BaseModel doesn't
+    // set `extra = "forbid"`, so pydantic's default `extra = "ignore"` means a
+    // 5.0 server silently drops it rather than rejecting the request.
+    @Json(name = "rom_ids") val romIds: List<Int>? = null,
     val saves: List<ClientSaveState>
 )
 

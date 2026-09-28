@@ -2,6 +2,7 @@ package com.theycallmeboxy.caulker.data.repository
 
 import android.content.Context
 import com.theycallmeboxy.caulker.BuildConfig
+import com.theycallmeboxy.caulker.data.api.MissingScopesException
 import com.theycallmeboxy.caulker.data.api.RommApiService
 import com.theycallmeboxy.caulker.data.api.SaveConflictException
 import com.theycallmeboxy.caulker.data.api.model.ClientSaveState
@@ -38,6 +39,9 @@ data class LocalSaveStat(val contentHash: String, val sizeBytes: Long, val modif
 // without re-reading (and re-hashing) the local file.
 data class UploadResult(val serverMs: Long, val saveId: Int, val contentHash: String?)
 
+// RomM 5.3.1's cap on /api/sync/negotiate's rom_ids scope (utils/validation.MAX_ROM_IDS_PER_QUERY).
+private const val MAX_NEGOTIATE_ROM_IDS = 500
+
 @Singleton
 class SaveRepository @Inject constructor(
     private val api: RommApiService,
@@ -45,18 +49,32 @@ class SaveRepository @Inject constructor(
     private val rootHelper: RootFileHelper,
     @ApplicationContext private val context: Context
 ) {
+    // Saves/devices calls need devices.read/devices.write in addition to
+    // assets.* (see ApiScopes.kt), which is easy to leave out when a pairing
+    // token is created with only the "save" preset in RomM's UI. Map a bare
+    // 403 from one of those calls to a message naming the fix, instead of
+    // letting retrofit2.HttpException's opaque "HTTP 403 Forbidden" surface
+    // as-is through the ViewModels/orchestrator that just relay e.message.
+    private suspend fun <T> mapForbidden(block: suspend () -> T): T = try {
+        block()
+    } catch (e: HttpException) {
+        if (e.code() == 403) throw MissingScopesException() else throw e
+    }
+
     suspend fun getOrRegisterDeviceId(): String {
         val existing = prefsStore.deviceId.first()
         if (!existing.isNullOrBlank()) return existing
         val name = prefsStore.deviceName.first()
             ?.takeIf { it.isNotBlank() }
             ?: android.os.Build.MODEL
-        val device = api.registerDevice(
-            RegisterDeviceRequest(
-                name = name,
-                clientVersion = BuildConfig.VERSION_NAME
+        val device = mapForbidden {
+            api.registerDevice(
+                RegisterDeviceRequest(
+                    name = name,
+                    clientVersion = BuildConfig.VERSION_NAME
+                )
             )
-        )
+        }
         prefsStore.setDeviceId(device.id)
         return device.id
     }
@@ -154,7 +172,7 @@ class SaveRepository @Inject constructor(
 
         rootHelper.backupFile(destPath)
 
-        val response = api.downloadSave(saveId, deviceId, sessionId)
+        val response = mapForbidden { api.downloadSave(saveId, deviceId, sessionId) }
         val body = response.body() ?: error("Empty save response from server")
 
         withContext(Dispatchers.IO) {
@@ -163,7 +181,7 @@ class SaveRepository @Inject constructor(
             remoteUpdatedAtMs?.let { rootHelper.setLastModified(destPath, it) }
         }
 
-        api.markSaveDownloaded(saveId, MarkDownloadedRequest(deviceId))
+        mapForbidden { api.markSaveDownloaded(saveId, MarkDownloadedRequest(deviceId)) }
     }
 
     // Uploads a save that already exists on-device at the resolved save path.
@@ -229,6 +247,7 @@ class SaveRepository @Inject constructor(
                     saveFile = part
                 )
             } catch (e: HttpException) {
+                if (e.code() == 403) throw MissingScopesException()
                 throw SaveConflictException.parse(e) ?: e
             }
         } finally {
@@ -240,8 +259,21 @@ class SaveRepository @Inject constructor(
 
     // Asks the server to compute per-save sync actions for this device given the
     // client's current save state. Returns a session id + operations to execute.
-    suspend fun negotiate(deviceId: String, saves: List<ClientSaveState>): SyncNegotiateResponse =
-        api.negotiateSync(SyncNegotiateRequest(deviceId, saves))
+    // romIds optionally scopes the negotiation to the caller's enrolled ROMs
+    // (RomM 5.3.1's SyncNegotiatePayload.rom_ids, capped server-side at 500 —
+    // see utils/validation.MAX_ROM_IDS_PER_QUERY). A negotiate is one request
+    // per sync session (sending more would need a second session, cancelling
+    // the first), so an over-cap list is safer sent unscoped than truncated;
+    // the server then just returns the caller's whole save library instead of
+    // narrowing it, matching the pre-5.3.1 behavior.
+    suspend fun negotiate(
+        deviceId: String,
+        saves: List<ClientSaveState>,
+        romIds: List<Int>? = null
+    ): SyncNegotiateResponse {
+        val scope = romIds?.takeIf { it.isNotEmpty() && it.size <= MAX_NEGOTIATE_ROM_IDS }
+        return mapForbidden { api.negotiateSync(SyncNegotiateRequest(deviceId, scope, saves)) }
+    }
 
     // Marks a sync session complete.
     suspend fun completeSession(
@@ -249,21 +281,23 @@ class SaveRepository @Inject constructor(
         operationsCompleted: Int,
         operationsFailed: Int
     ) {
-        api.completeSyncSession(
-            sessionId,
-            SyncCompleteRequest(
-                operationsCompleted = operationsCompleted,
-                operationsFailed = operationsFailed
+        mapForbidden {
+            api.completeSyncSession(
+                sessionId,
+                SyncCompleteRequest(
+                    operationsCompleted = operationsCompleted,
+                    operationsFailed = operationsFailed
+                )
             )
-        )
+        }
     }
 
     // Re-enable / disable sync tracking for a specific save on this device.
     suspend fun trackSave(saveId: Int, deviceId: String): SaveResponse =
-        api.trackSave(saveId, MarkDownloadedRequest(deviceId))
+        mapForbidden { api.trackSave(saveId, MarkDownloadedRequest(deviceId)) }
 
     suspend fun untrackSave(saveId: Int, deviceId: String): SaveResponse =
-        api.untrackSave(saveId, MarkDownloadedRequest(deviceId))
+        mapForbidden { api.untrackSave(saveId, MarkDownloadedRequest(deviceId)) }
 
     suspend fun getLocalFilePath(fileName: String, platformFsSlug: String?): String? {
         val dir = effectiveSaveDir(platformFsSlug) ?: return null
@@ -284,6 +318,6 @@ class SaveRepository @Inject constructor(
     // Falls back to an unscoped call if no device id is registered yet.
     suspend fun syncSavesForRom(romId: Int): List<SaveResponse> {
         val deviceId = try { getOrRegisterDeviceId() } catch (_: Exception) { null }
-        return api.getSaves(romId = romId, deviceId = deviceId)
+        return mapForbidden { api.getSaves(romId = romId, deviceId = deviceId) }
     }
 }

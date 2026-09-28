@@ -158,7 +158,10 @@ class SaveSyncOrchestrator @Inject constructor(
         }
 
         // --- Phase 2: ask the server to plan the sync. ---
-        val neg = saveRepository.negotiate(deviceId, clientSaves)
+        // Scope negotiate to the enrolled ROMs (RomM 5.3.1+) so the server doesn't
+        // plan downloads for the rest of the user's save library; negotiate()
+        // falls back to an unscoped request on older servers or an over-cap list.
+        val neg = saveRepository.negotiate(deviceId, clientSaves, romIds = enrolled)
         val enrolledSet = enrolled.toSet()
 
         fun matchesEnrolledSlot(op: SyncOperation): Boolean {
