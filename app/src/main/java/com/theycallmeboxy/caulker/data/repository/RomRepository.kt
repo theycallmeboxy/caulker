@@ -113,10 +113,33 @@ class RomRepository @Inject constructor(
         val basePath = prefsStore.romBasePath.first() ?: return
         val override = prefsStore.getPlatformOverride(rom.platformFsSlug)
         if (rom.hasMultipleFiles) {
-            // Delete the m3u plus every file referenced by the entity
+            // Always remove a Caulker-written playlist at the canonical name
+            // first -- harmless no-op when the server's own .m3u (a different
+            // name) was downloaded instead; that one is deleted below along
+            // with the rest of the server's file list.
             effectiveRomFile(basePath, rom.platformFsSlug, primaryLocalFileName(rom), override)?.delete()
-            RomFile.parseList(rom.filesJson).forEach { f ->
-                effectiveRomFile(basePath, rom.platformFsSlug, f.fileName, override)?.delete()
+
+            // The detail endpoint is the authoritative file list (with the
+            // paths needed to resolve nested files); fall back to the stale
+            // flat filesJson from the last library sync if it's unreachable
+            // so a delete still cleans up what it can rather than doing
+            // nothing.
+            val relativePaths: List<String> = try {
+                val detail = api.getRom(rom.id)
+                // A path that fails the safety check is skipped rather than
+                // falling back to the raw file name -- that fallback is only
+                // safe for the "not nested" case resolveDownloadRelativePath
+                // already handles internally.
+                detail.files.mapNotNull { f ->
+                    resolveDownloadRelativePath(detail.fullPath, f.fullPath, f.fileName)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                RomFile.parseList(rom.filesJson).map { it.fileName }
+            }
+            relativePaths.forEach { relativePath ->
+                effectiveRomFile(basePath, rom.platformFsSlug, relativePath, override)?.delete()
             }
         } else {
             effectiveRomFile(basePath, rom.platformFsSlug, rom.fileName ?: rom.name, override)?.delete()
@@ -258,12 +281,7 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
         val override = prefsStore.getPlatformOverride(rom.platformFsSlug)
 
         if (rom.hasMultipleFiles) {
-            val files = RomFile.parseList(rom.filesJson)
-            if (files.isEmpty()) {
-                emit(DownloadProgress.Failed("ROM is marked multi-file but has no file list"))
-                return@flow
-            }
-            downloadMultiFileRom(rom, files, basePath, override, this)
+            downloadMultiFileRom(rom, basePath, override, this)
         } else {
             val fileName = rom.fileName ?: rom.name
             val destFile = effectiveRomFile(basePath, rom.platformFsSlug, fileName, override)
@@ -283,7 +301,12 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
         contentLength: Long,
         emitter: kotlinx.coroutines.flow.FlowCollector<DownloadProgress>,
         progressOffsetBytes: Long = 0,
-        progressTotalBytes: Long = -1
+        progressTotalBytes: Long = -1,
+        // Selects one file of a multi-part rom via RomM's content endpoint.
+        // Omitted for single-file roms. Without it the endpoint zips up every
+        // file the rom has (plus a generated m3u) instead of serving the one
+        // file requested by name -- see downloadMultiFileRom.
+        fileId: Int? = null
     ): Boolean {
         val parent = destFile.parentFile
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
@@ -291,8 +314,10 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
             return false
         }
 
+        val url = "api/roms/$romId/content/${Uri.encode(fileName)}" +
+            if (fileId != null) "?file_ids=$fileId" else ""
         val response = try {
-            api.downloadFile("api/roms/$romId/content/${Uri.encode(fileName)}")
+            api.downloadFile(url)
         } catch (e: Exception) {
             emitter.emit(DownloadProgress.Failed(e.message ?: "Network error"))
             return false
@@ -349,37 +374,84 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
         return true
     }
 
-    // Multi-file ROMs (multi-disc games): download each file in order, emit
-    // unified progress (aggregate across all files), then write an .m3u playlist
-    // alongside them with the relative filenames. Matches grout's behavior.
+    // Multi-file ROMs (multi-disc games): the library sync never populates
+    // RomEntity.filesJson (RomM's list endpoint omits `files` unless
+    // `with_files=true`, which Caulker doesn't ask for to keep the sync
+    // lean), so the file list -- with the per-file ids and paths a correct
+    // download needs -- is fetched fresh from the detail endpoint here.
+    // Downloads each file in order via `file_ids` (RomM's content endpoint
+    // ignores the file_name path segment for selection and otherwise zips up
+    // every file the rom has), emits unified progress across all of them,
+    // then writes an .m3u playlist alongside them -- unless the server's own
+    // file list already has one, in which case it was just downloaded like
+    // any other file and Caulker writes none of its own.
     private suspend fun downloadMultiFileRom(
         rom: RomEntity,
-        files: List<RomFile>,
         basePath: String,
         override: PlatformOverride?,
         emitter: kotlinx.coroutines.flow.FlowCollector<DownloadProgress>
     ) {
-        val totalBytes = files.sumOf { it.fileSize.coerceAtLeast(0) }
-            .takeIf { it > 0 } ?: -1L
-        var bytesDone = 0L
+        val detail = try {
+            api.getRom(rom.id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emitter.emit(DownloadProgress.Failed("Could not fetch ROM file list — ${e.message ?: e.javaClass.simpleName}"))
+            return
+        }
+        if (detail.files.isEmpty()) {
+            emitter.emit(DownloadProgress.Failed("ROM is marked multi-file but has no file list"))
+            return
+        }
 
-        for (file in files) {
-            val destFile = effectiveRomFile(basePath, rom.platformFsSlug, file.fileName, override)
+        // Resolve every file's local path up front -- one unsafe entry fails
+        // the whole download before anything is written, rather than partway
+        // through.
+        data class Resolved(val id: Int, val fileName: String, val fileSize: Long, val relativePath: String, val destFile: File)
+        val resolved = mutableListOf<Resolved>()
+        for (f in detail.files) {
+            val relativePath = resolveDownloadRelativePath(detail.fullPath, f.fullPath, f.fileName)
+            if (relativePath == null) {
+                emitter.emit(DownloadProgress.Failed("Unsafe file path from server: ${f.fileName}"))
+                return
+            }
+            val destFile = effectiveRomFile(basePath, rom.platformFsSlug, relativePath, override)
                 ?: run {
                     emitter.emit(DownloadProgress.Failed("ROM path not configured for this platform"))
                     return
                 }
+            resolved += Resolved(f.id, f.fileName, f.fileSize, relativePath, destFile)
+        }
+
+        val totalBytes = resolved.sumOf { it.fileSize.coerceAtLeast(0) }
+            .takeIf { it > 0 } ?: -1L
+        var bytesDone = 0L
+
+        for (r in resolved) {
             val ok = downloadSingleFile(
                 romId = rom.id,
-                fileName = file.fileName,
-                destFile = destFile,
-                contentLength = file.fileSize,
+                fileName = r.fileName,
+                destFile = r.destFile,
+                contentLength = r.fileSize,
                 emitter = emitter,
                 progressOffsetBytes = bytesDone,
-                progressTotalBytes = totalBytes
+                progressTotalBytes = totalBytes,
+                fileId = r.id
             )
             if (!ok) return
-            bytesDone += file.fileSize.coerceAtLeast(0)
+            bytesDone += r.fileSize.coerceAtLeast(0)
+        }
+
+        val serverM3u = resolved.firstOrNull { isM3uFileName(it.fileName) }
+        if (serverM3u != null) {
+            // The server's own playlist was just downloaded above like any
+            // other file. NOTE: if its name doesn't match
+            // primaryLocalFileName(rom) (fs_name_no_ext + ".m3u"), Caulker's
+            // installed-detection (localFile / getInstalledRomIds, which only
+            // look for that exact name) won't recognize this ROM as
+            // installed even though every file is on disk.
+            emitter.emit(DownloadProgress.Done(serverM3u.destFile))
+            return
         }
 
         val m3uFile = effectiveRomFile(basePath, rom.platformFsSlug, primaryLocalFileName(rom), override)
@@ -388,7 +460,8 @@ fun downloadRom(rom: RomEntity): Flow<DownloadProgress> = flow {
             return
         }
         try {
-            m3uFile.writeText(files.joinToString("\n") { it.fileName } + "\n")
+            val content = buildM3uContent(resolved.map { PlaylistCandidate(it.fileName, it.relativePath) })
+            m3uFile.writeText(content)
         } catch (e: Exception) {
             emitter.emit(DownloadProgress.Failed("Failed to write m3u: ${e.message}"))
             return

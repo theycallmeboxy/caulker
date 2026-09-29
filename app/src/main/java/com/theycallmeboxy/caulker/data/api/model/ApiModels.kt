@@ -77,6 +77,12 @@ data class RomResponse(
     @Json(name = "sha1_hash") val sha1Hash: String? = null,
     @Json(name = "has_multiple_files") val hasMultipleFiles: Boolean = false,
     val files: List<RomFileResponse> = emptyList(),
+    // The rom's own path on the server, `fs_path/fs_name`. Only present on
+    // the detail response (getRom) -- the list endpoint doesn't request
+    // `with_files`, so there's no per-file paths to resolve against anyway.
+    // Used to resolve each file's download-relative path; see
+    // resolveDownloadRelativePath in MultiFileRom.kt.
+    @Json(name = "full_path") val fullPath: String? = null,
     @Json(name = "created_at") val createdAt: String? = null,
     @Json(name = "updated_at") val updatedAt: String? = null,
     // RomM 5.3+ save-matching fields (server-computed by its scan pipeline, not
@@ -93,9 +99,16 @@ data class RomResponse(
 
 @JsonClass(generateAdapter = true)
 data class RomFileResponse(
+    // RomM's RomFileSchema id -- required to select one file of a multi-file
+    // rom via the content endpoint's `file_ids` query param (without it, the
+    // endpoint zips up every file the rom has, m3u included).
     val id: Int = 0,
     @Json(name = "file_name") val fileName: String,
-    @Json(name = "file_size_bytes") val fileSize: Long = 0
+    @Json(name = "file_size_bytes") val fileSize: Long = 0,
+    // This file's own full path on the server, `file_path/file_name`. Used
+    // with RomResponse.fullPath to resolve where a nested file (below the
+    // rom's own folder) should land locally; see resolveDownloadRelativePath.
+    @Json(name = "full_path") val fullPath: String? = null
 )
 
 @JsonClass(generateAdapter = true)
