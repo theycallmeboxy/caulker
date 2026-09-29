@@ -201,6 +201,20 @@ class SaveSyncOrchestrator @Inject constructor(
                 done = index, total = actionable.size, currentRomId = op.romId, currentRomName = ctx.rom.name
             )
             try {
+                if (shouldSkipForBaselineMismatch(op, ctx)) {
+                    // Blocker 2 / review item 3: negotiate's own decision is
+                    // server-side bookkeeping, independent of Caulker's
+                    // client-only baseline-path concept (§5) -- it must
+                    // never be trusted to silently overwrite a configured
+                    // platform's file with no path-matching baseline. The
+                    // orchestrator has no UI to prompt with (this task's
+                    // explicit instruction: it must never prompt), so it
+                    // skips instead -- no baseline is written, so the next
+                    // screen load's own determineSyncAction (SyncAction.kt)
+                    // surfaces this ROM as CONFLICT, i.e. "needs attention."
+                    skipped++
+                    return@forEachIndexed
+                }
                 when (op.action) {
                     "upload" -> executeUpload(op, ctx, neg.sessionId, onUploaded = { uploaded++ }, onSkipped = { skipped++ })
                     "download" -> executeDownload(op, ctx, neg.sessionId, onDownloaded = { downloaded++ }, onSkipped = { skipped++ })
@@ -315,6 +329,24 @@ class SaveSyncOrchestrator @Inject constructor(
         }
     }
 
+    // Blocker 2 / review item 3: the I/O half (fetching the baseline) around
+    // SyncAction.kt's pure needsAttentionInsteadOfSync -- unconfigured
+    // platforms always return false here (never fetch a baseline they'll
+    // never use).
+    private suspend fun shouldSkipForBaselineMismatch(op: SyncOperation, ctx: RomCtx): Boolean {
+        ctx.configured ?: return false
+        val baseline = prefsStore.getSyncBaseline(op.romId, ctx.slot)
+        return needsAttentionInsteadOfSync(
+            localExists = ctx.configuredUnit != null,
+            // negotiate only sets save_id when the server has a save for this slot
+            remoteExists = op.saveId != null,
+            localHash = ctx.negotiatedContentHash,
+            remoteHash = op.serverContentHash,
+            baseline = baseline,
+            currentResolvedPath = ctx.configuredUnit?.resolvedPath
+        )
+    }
+
     private suspend fun executeUpload(
         op: SyncOperation,
         ctx: RomCtx,
@@ -372,12 +404,13 @@ class SaveSyncOrchestrator @Inject constructor(
         if (saveId == null) {
             onSkipped()
         } else if (configured != null) {
-            // Defense in depth, same spirit as the legacy branch below:
-            // re-check the matched local unit's hash right before
-            // overwriting it, skipping rather than clobbering if it changed
-            // since negotiate. A real scan error here propagates (no
-            // swallow-to-null) so it's counted as an error by the caller,
-            // not silently treated as "unchanged" (item 6).
+            // Blocker 1 (round 2): resolveDownloadTarget is the single
+            // source of truth for where this download lands -- a stale
+            // assignment (its target entry rule-matched by a DIFFERENT,
+            // newly-added ROM) is refused here, never guessed at; per this
+            // task's explicit instruction the background path skips and
+            // counts the ROM rather than prompting, same as any other
+            // Refused outcome below.
             // TODO(phase-3B): this re-scans the platform per download
             // operation even though gatherOne's preScannedUnits already
             // scanned it once this sync pass -- independent review round 2,
@@ -385,18 +418,24 @@ class SaveSyncOrchestrator @Inject constructor(
             // check's whole point is to see state AS OF right now, so simply
             // reusing the stale gather-phase unit isn't a free win the way
             // the read-side caching elsewhere in this pass is).
-            val currentUnit = saveLocationRepository.unitFor(ctx.rom)?.second
+            val target = saveLocationRepository.resolveDownloadTarget(configured, ctx.rom)
+            val (matchingKeyName, currentUnit) = when (target) {
+                is SaveLocationRepository.DownloadTarget.Resolved -> target.matchingKeyName to target.previousUnit
+                is SaveLocationRepository.DownloadTarget.Refused -> {
+                    onSkipped()
+                    return
+                }
+            }
+            // Defense in depth, same spirit as the legacy branch below:
+            // re-check the matched local unit's hash right before
+            // overwriting it, skipping rather than clobbering if it changed
+            // since negotiate. A real scan error here propagates (no
+            // swallow-to-null) so it's counted as an error by the caller,
+            // not silently treated as "unchanged" (item 6).
             val changedSinceNegotiate = ctx.negotiatedContentHash != null &&
                 currentUnit != null &&
                 currentUnit.contentHash != ctx.negotiatedContentHash
             if (changedSinceNegotiate) {
-                onSkipped()
-                return
-            }
-            // preset-aware: SAVE_TARGET-matched presets (Dreamcast, PSP) key
-            // on RomEntity.saveTarget, not the ROM filename.
-            val matchingKeyName = saveLocationRepository.matchingKeyNameFor(configured.preset, ctx.rom)
-            if (matchingKeyName == null) {
                 onSkipped()
                 return
             }
@@ -405,6 +444,20 @@ class SaveSyncOrchestrator @Inject constructor(
                 incomingEmulatorId = op.emulator, sessionId = sessionId, previousUnit = currentUnit
             )
             if (!outcome.success) {
+                if (outcome.guardWarning) {
+                    // §7 download guard / Phase 3B: this task's explicit
+                    // instruction is that the background orchestrator (also
+                    // driving the QS tile and the foreground service) must
+                    // NEVER prompt -- unlike a real failure, this is a
+                    // deliberate skip, so it's tallied as skipped, not an
+                    // error. No baseline is recorded (blocker 1, unchanged),
+                    // so this ROM's syncAction stays DOWNLOAD on the next
+                    // load -- that's how the per-game and Sync All screens
+                    // surface it as needing the user's attention, where they
+                    // can review and confirm "Download anyway" interactively.
+                    onSkipped()
+                    return
+                }
                 // A refused/failed download writes nothing and must not
                 // record a baseline (blocker 1) -- and per the independent
                 // review, must be counted as an error (not silently

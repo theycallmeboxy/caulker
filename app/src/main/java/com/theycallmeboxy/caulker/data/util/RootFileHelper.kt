@@ -29,6 +29,22 @@ class RootFileHelper @Inject constructor() {
             .out.firstOrNull()?.trim() == "1"
     }
 
+    // Phase 3B fixes, item 7: validates a save-folder path BEFORE persisting
+    // it as a platform's v1 config -- treeUriToPath (PlatformSettingsScreen.kt)
+    // can produce a bogus path for a document tree Caulker doesn't otherwise
+    // recognize (a "home:"/"raw:" tree id, or its own uri.path fallback), and
+    // a manually typed path can be anything at all. An absolute path that
+    // doesn't exist, isn't a directory, or isn't readable must never be
+    // silently accepted.
+    suspend fun isReadableDirectory(path: String): Boolean = withContext(Dispatchers.IO) {
+        if (!path.startsWith("/")) return@withContext false
+        val f = File(path)
+        if (f.exists()) return@withContext f.isDirectory && f.canRead()
+        if (!isRootAvailable()) return@withContext false
+        Shell.cmd("[ -d ${q(path)} -a -r ${q(path)} ] && echo 1 || echo 0").exec()
+            .out.firstOrNull()?.trim() == "1"
+    }
+
     suspend fun lastModifiedMs(path: String): Long = withContext(Dispatchers.IO) {
         val f = File(path)
         if (f.exists()) return@withContext f.lastModified()

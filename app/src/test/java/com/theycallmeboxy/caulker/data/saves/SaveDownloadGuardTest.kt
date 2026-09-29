@@ -87,4 +87,35 @@ class SaveDownloadGuardTest {
         val result = downloadGuardDecision("desmume", "caulker", compatibility)
         assertEquals(DownloadGuardDecision.ALLOW, result)
     }
+
+    // --- downloadNeedsGuardConfirmation (Phase 3B: the flag is now on, and
+    // this is what SaveLocationRepository.download() and the ViewModels
+    // deciding whether to show the confirmation dialog both call) ----------
+
+    @Test
+    fun `needs confirmation mirrors WARN_INCOMPATIBLE when the gate is enabled`() {
+        // DOWNLOAD_GUARD_ENABLED is a compile-time const, true as of Phase
+        // 3B -- this asserts downloadNeedsGuardConfirmation agrees with
+        // downloadGuardDecision rather than re-deciding independently.
+        assertEquals(true, DOWNLOAD_GUARD_ENABLED)
+        assertEquals(true, downloadNeedsGuardConfirmation("desmume", "melonds", compatibility))
+    }
+
+    @Test
+    fun `needs confirmation is false for an interchangeable pair`() {
+        assertEquals(false, downloadNeedsGuardConfirmation("swanstation", "mednafen_psx_hw", compatibility))
+    }
+
+    @Test
+    fun `needs confirmation is false with no configured preset`() {
+        assertEquals(false, downloadNeedsGuardConfirmation("desmume", null, compatibility))
+    }
+
+    @Test
+    fun `needs confirmation defaults to the real SaveFormatFamilies table when none is passed`() {
+        // Uses the default `compatibility` param (SaveFormatFamilies.build())
+        // instead of this test's representative slice -- exercises the real
+        // Phase 4 preset data's DeSmuME/melonDS split.
+        assertEquals(true, downloadNeedsGuardConfirmation("desmume", "melonds"))
+    }
 }

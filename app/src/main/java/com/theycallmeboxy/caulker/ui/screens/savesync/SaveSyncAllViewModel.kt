@@ -218,17 +218,31 @@ class SaveSyncAllViewModel @Inject constructor(
             val baseline = effectiveBaseline(
                 prefsStore.getSyncBaseline(romId, target), resolvedPath, requirePathRecorded = configured != null
             )
+            val syncAction = determineSyncAction(
+                slotResponse, hasLocal, localMs, deviceSync,
+                localHash = localHash, remoteHash = save?.contentHash,
+                baseline = baseline, isConfiguredPlatform = configured != null
+            )
+            // §7 download guard (Phase 3B) -- same up-front computation as
+            // SaveSyncViewModel's per-game screen, gated to the two actions
+            // that will actually download under normal Sync All (nit: "show
+            // the guard icon only on rows that will actually download").
+            // Revert can also force-download an UPLOAD row, but that's a
+            // deliberate, separate action with its own confirmation flow
+            // (revertOne re-derives its own guard state from that download's
+            // outcome directly) -- this row-level badge is about ordinary
+            // sync, not about Revert specifically.
+            val guardWarning = configured != null &&
+                (syncAction == SyncAction.DOWNLOAD || syncAction == SyncAction.CONFLICT) &&
+                saveLocationRepository.downloadGuardWarningFor(configured, save?.emulator)
             val status = SlotUiState(
                 slot = slotResponse,
                 fileName = localFileName,
+                guardWarning = guardWarning,
                 saveId = save?.id,
                 hasLocalFile = hasLocal,
                 localModifiedMs = localMs,
-                syncAction = determineSyncAction(
-                    slotResponse, hasLocal, localMs, deviceSync,
-                    localHash = localHash, remoteHash = save?.contentHash,
-                    baseline = baseline
-                ),
+                syncAction = syncAction,
                 isUntracked = deviceSync?.isUntracked ?: false
             )
             RomSyncGroup(romId, rom.name, platformName, platformFsSlug, romFileName, status)
@@ -258,6 +272,25 @@ class SaveSyncAllViewModel @Inject constructor(
         orchestrator.cancel()
     }
 
+    // §7 download guard (Phase 3B): a group revertAll() held back because
+    // its download would overwrite the local save with a
+    // possibly-incompatible incoming one (guardWarning was already true on
+    // that row -- see buildGroupForRom), together with the specific save id
+    // that triggered it. The screen shows one confirmation dialog listing
+    // them; confirmGuardedReverts() re-runs just these, tying each
+    // confirmation to the exact save id the user saw (Phase 3B fixes nit:
+    // "the guard bypass must be tied to the specific save id the user
+    // confirmed") -- if a refetch turns up a different save, that group's
+    // guard fires again rather than trusting a stale confirmation.
+    // dismissGuardedReverts() leaves them as-is (their syncAction stays
+    // UPLOAD, i.e. "needs attention," same as any other un-reverted row).
+    private data class GuardBlockedRevert(val group: RomSyncGroup, val saveId: Int)
+
+    private val _pendingGuardReverts = MutableStateFlow<List<GuardBlockedRevert>>(emptyList())
+    val pendingGuardReverts: StateFlow<List<RomSyncGroup>> =
+        _pendingGuardReverts.map { list -> list.map { it.group } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     fun revertAll() {
         // "Revert" means: for slots that would currently upload (local newer than
         // server), download instead — discard local changes for whatever's
@@ -269,58 +302,102 @@ class SaveSyncAllViewModel @Inject constructor(
         // screen use — otherwise a bulk sync in progress could race these
         // downloads against its own negotiated ops.
         viewModelScope.launch {
-            if (!saveSyncLock.mutex.tryLock()) {
-                _error.value = "Save sync in progress — try again when it finishes"
-                return@launch
-            }
-            val failures = mutableListOf<String>()
-            try {
-                _groups.value = _groups.value.map { group ->
-                    if (group.status.syncAction == SyncAction.UPLOAD)
-                        group.copy(status = group.status.copy(isSyncing = true))
-                    else group
-                }
-                for (group in _groups.value.filter { it.status.syncAction == SyncAction.UPLOAD }) {
-                    val reason = revertOne(group)
-                    if (reason != null) failures += "${group.romName}: $reason"
-                }
-            } finally {
-                saveSyncLock.mutex.unlock()
-            }
-            // The revert path must keep and show a refusal reason, not swallow
-            // it (independent review, nits) -- surfaced as a combined error
-            // rather than per-row, since revertAll() is a single bulk action.
-            if (failures.isNotEmpty()) {
-                _error.value = "Some reverts failed:\n" + failures.joinToString("\n")
-            }
-            refresh()
+            runRevert(
+                _groups.value.filter { it.status.syncAction == SyncAction.UPLOAD }.map { it to null },
+            )
         }
     }
 
-    // Returns null on success, or a human-readable failure reason (surfaced
-    // by revertAll() -- independent review nit: "the revert path must keep
-    // and show the refusal reason").
-    private suspend fun revertOne(group: RomSyncGroup): String? {
+    // User confirmed "Download anyway" for every guard-blocked row from the
+    // last revertAll() pass.
+    fun confirmGuardedReverts() {
+        val blocked = _pendingGuardReverts.value
+        _pendingGuardReverts.value = emptyList()
+        viewModelScope.launch { runRevert(blocked.map { it.group to it.saveId }) }
+    }
+
+    fun dismissGuardedReverts() {
+        _pendingGuardReverts.value = emptyList()
+    }
+
+    // `targets`: (group, confirmedSaveId) -- confirmedSaveId is null for a
+    // fresh revertAll() pass (nothing confirmed yet) or the exact save id
+    // the user confirmed for a guard-blocked retry.
+    private suspend fun runRevert(targets: List<Pair<RomSyncGroup, Int?>>) {
+        if (targets.isEmpty()) return
+        if (!saveSyncLock.mutex.tryLock()) {
+            _error.value = "Save sync in progress — try again when it finishes"
+            return
+        }
+        val failures = mutableListOf<String>()
+        val guardBlocked = mutableListOf<GuardBlockedRevert>()
+        try {
+            val targetIds = targets.mapTo(HashSet()) { it.first.romId }
+            _groups.value = _groups.value.map { group ->
+                if (group.romId in targetIds) group.copy(status = group.status.copy(isSyncing = true)) else group
+            }
+            for ((group, confirmedSaveId) in targets) {
+                when (val result = revertOne(group, confirmedSaveId)) {
+                    is RevertResult.Success -> {}
+                    is RevertResult.GuardBlocked -> guardBlocked += GuardBlockedRevert(group, result.saveId)
+                    is RevertResult.Failed -> failures += "${group.romName}: ${result.reason}"
+                }
+            }
+        } finally {
+            saveSyncLock.mutex.unlock()
+        }
+        // The revert path must keep and show a refusal reason, not swallow
+        // it (independent review, nits) -- surfaced as a combined error
+        // rather than per-row, since revertAll() is a single bulk action.
+        // Nit: never surface the raw "download guard: ..." string -- guard
+        // blocks are routed to `guardBlocked`/the confirmation dialog, never
+        // into `failures`.
+        if (failures.isNotEmpty()) {
+            _error.value = "Some reverts failed:\n" + failures.joinToString("\n")
+        }
+        if (guardBlocked.isNotEmpty()) {
+            _pendingGuardReverts.value = guardBlocked
+        }
+        refresh()
+    }
+
+    private sealed class RevertResult {
+        data object Success : RevertResult()
+        data class GuardBlocked(val saveId: Int) : RevertResult()
+        data class Failed(val reason: String) : RevertResult()
+    }
+
+    private suspend fun revertOne(group: RomSyncGroup, confirmedSaveId: Int? = null): RevertResult {
         try {
             val slotKey = group.status.slot.slotKey
             val save = saveRepository.syncSavesForRom(group.romId)
                 .filter { it.slot == slotKey }
                 .maxByOrNull { it.updatedAt ?: "" }
-                ?: return "no save found on the server for slot \"$slotKey\""
+                ?: return RevertResult.Failed("no save found on the server for slot \"$slotKey\"")
 
             val configured = saveLocationRepository.configuredPlatform(group.platformFsSlug)
             if (configured != null) {
-                val rom = romRepository.getById(group.romId) ?: return "ROM no longer exists locally"
-                // preset-aware: SAVE_TARGET-matched presets (Dreamcast, PSP)
-                // key on RomEntity.saveTarget, not the ROM filename.
-                val matchingKeyName = saveLocationRepository.matchingKeyNameFor(configured.preset, rom)
-                    ?: return "cannot resolve a matching-key name for this ROM"
-                val previousUnit = saveLocationRepository.unitFor(rom)?.second
+                val rom = romRepository.getById(group.romId) ?: return RevertResult.Failed("ROM no longer exists locally")
+                // Blocker 1 (round 2): resolveDownloadTarget is the single
+                // source of truth for where this download lands -- see its
+                // own doc comment (SaveLocationRepository.kt).
+                val target = saveLocationRepository.resolveDownloadTarget(configured, rom)
+                val (matchingKeyName, previousUnit) = when (target) {
+                    is SaveLocationRepository.DownloadTarget.Resolved -> target.matchingKeyName to target.previousUnit
+                    is SaveLocationRepository.DownloadTarget.Refused -> return RevertResult.Failed(target.reason)
+                }
                 val outcome = saveLocationRepository.download(
                     configured, matchingKeyName, save.id, save.fileName,
-                    incomingEmulatorId = save.emulator, previousUnit = previousUnit
+                    incomingEmulatorId = save.emulator, previousUnit = previousUnit, confirmedSaveId = confirmedSaveId
                 )
-                if (!outcome.success) return outcome.reason ?: "download refused"
+                if (!outcome.success) {
+                    // Nit: never surface outcome.reason's raw "download
+                    // guard: ..." string -- GuardBlocked carries just the
+                    // save id, and the caller's confirmation dialog supplies
+                    // its own copy.
+                    return if (outcome.guardWarning) RevertResult.GuardBlocked(save.id)
+                    else RevertResult.Failed(outcome.reason ?: "download refused")
+                }
                 // §5 path (item 1) and hash fallback (item 2) both come from
                 // what was ACTUALLY just written, never previousUnit's stale
                 // pre-download hash/path.
@@ -331,7 +408,7 @@ class SaveSyncAllViewModel @Inject constructor(
                         group.romId, slotKey, SyncBaseline(baselineHash, save.id, save.updatedAt, resolvedPath = resolvedPath)
                     )
                 }
-                return null
+                return RevertResult.Success
             }
 
             val remoteMs = parseIsoToMs(save.updatedAt)
@@ -346,11 +423,11 @@ class SaveSyncAllViewModel @Inject constructor(
             if (baselineHash != null) {
                 prefsStore.setSyncBaseline(group.romId, slotKey, SyncBaseline(baselineHash, save.id, save.updatedAt))
             }
-            return null
+            return RevertResult.Success
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            return e.message ?: "unknown error"
+            return RevertResult.Failed(e.message ?: "unknown error")
         }
     }
 }

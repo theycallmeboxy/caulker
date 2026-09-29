@@ -185,9 +185,19 @@ Per preset, in this order:
    than one on-disk location for a single game, e.g. a dual-tree layout — not exercised by
    any v1 system, reserved for later platforms).
 3. **Unassigned files** — anything in the configured folder that doesn't match any
-   enrolled ROM by either rule above is listed in an "Unassigned files" UI, where the user
-   assigns it to a game once; that assignment is remembered (same durability tier as a
-   `PlatformOverride`) so it isn't re-prompted.
+   enrolled ROM by either rule above is listed in an "Unassigned files" UI. **Owner
+   decision (2026-09-29): manual assignment is Exchange-only.** For an Exchange preset, the
+   user can assign an unmatched file to a game once; that assignment is remembered (same
+   durability tier as a `PlatformOverride`) so it isn't re-prompted, and the resolver honors
+   it on every later scan (respecting the preset's shape, and never overriding a rule 1/2
+   match). For a Direct preset, this list is diagnostics only — there's no assign action,
+   because Direct is meant to be fully automatic; a file landing here means the emulator
+   saved it under a name/ID Caulker's automatic matching (rules 1/2) doesn't recognize, and
+   the fix is upstream of Caulker (rename the file to match the ROM, or get RomM a game ID
+   it can read — see supported-emulators.md's Dreamcast notes for the CHD/`.gdi`/`.cdi`
+   example). Any assignment record left over for a Direct preset (from before this
+   restriction existed, or from a preset since switched away from Exchange) is simply
+   ignored by the resolver, not just hidden by the UI.
 
 ### 4. RomM data: `title_id`, `save_target`, `save_target_layout`
 

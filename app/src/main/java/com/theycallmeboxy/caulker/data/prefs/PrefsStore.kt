@@ -9,7 +9,9 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.theycallmeboxy.caulker.data.saves.SavePlatformConfig
+import com.theycallmeboxy.caulker.data.saves.parseSaveAssignments
 import com.theycallmeboxy.caulker.data.saves.presetKeyFromJsonObject
+import com.theycallmeboxy.caulker.data.saves.serializeSaveAssignments
 import com.theycallmeboxy.caulker.data.saves.toJsonObject
 import com.theycallmeboxy.caulker.data.sync.SyncBaseline
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -50,6 +52,7 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
         val SAVE_SYNC_SLOT_PREFS = stringPreferencesKey("save_sync_slot_prefs")
         val SAVE_SYNC_BASELINE = stringPreferencesKey("save_sync_baseline")
         val SAVE_PLATFORM_CONFIGS = stringPreferencesKey("save_platform_configs")
+        val SAVE_UNASSIGNED_ASSIGNMENTS = stringPreferencesKey("save_unassigned_assignments")
         val INSECURE_SKIP_VERIFY = booleanPreferencesKey("insecure_skip_verify")
         val GLOBAL_ROM_SYNC_TIME = longPreferencesKey("global_rom_sync_time")
     }
@@ -260,6 +263,62 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
             obj.put(key, entry)
         }
         return obj.toString()
+    }
+
+    // --- Manual Unassigned-file assignments (save-sync design doc, Part 2
+    // §3 rule 3 / §12 phase 3) -- romId -> the relative path (within that
+    // platform's configured folder) the user manually pointed at that ROM
+    // from the Unassigned-files screen, keyed by platform fs slug. Wire
+    // format is data/saves/SaveAssignments.kt's parse/serializeSaveAssignments
+    // (pure, JVM-testable); this class only owns the DataStore key and the
+    // outer per-platform JSONObject wrapping one platform's assignment map,
+    // same split as SavePlatformConfig's own storage above. Same "no entry
+    // means nothing assigned" contract -- an assignment is honored by
+    // SaveLocationRepository.scan only for the entries rule-based matching
+    // (§3 rules 1/2) left unassigned (see resolveSaveLocations' doc comment),
+    // so a platform with no assignments behaves exactly as if this key never
+    // existed.
+    fun saveAssignments(fsSlug: String): Flow<Map<Int, String>> = context.dataStore.data.map { prefs ->
+        parseSaveAssignments(allSaveAssignmentsRoot(prefs[Keys.SAVE_UNASSIGNED_ASSIGNMENTS]).optJSONObject(fsSlug))
+    }
+
+    suspend fun getSaveAssignments(fsSlug: String): Map<Int, String> = saveAssignments(fsSlug).first()
+
+    suspend fun setSaveAssignment(fsSlug: String, romId: Int, relativePath: String) {
+        context.dataStore.edit { prefs ->
+            val root = allSaveAssignmentsRoot(prefs[Keys.SAVE_UNASSIGNED_ASSIGNMENTS])
+            val platformMap = parseSaveAssignments(root.optJSONObject(fsSlug)).toMutableMap()
+            platformMap[romId] = relativePath
+            root.put(fsSlug, serializeSaveAssignments(platformMap))
+            prefs[Keys.SAVE_UNASSIGNED_ASSIGNMENTS] = root.toString()
+        }
+    }
+
+    suspend fun clearSaveAssignment(fsSlug: String, romId: Int) {
+        context.dataStore.edit { prefs ->
+            val root = allSaveAssignmentsRoot(prefs[Keys.SAVE_UNASSIGNED_ASSIGNMENTS])
+            val platformMap = parseSaveAssignments(root.optJSONObject(fsSlug)).toMutableMap()
+            platformMap.remove(romId)
+            root.put(fsSlug, serializeSaveAssignments(platformMap))
+            prefs[Keys.SAVE_UNASSIGNED_ASSIGNMENTS] = root.toString()
+        }
+    }
+
+    // Wipes every assignment recorded for a platform in one go -- used when
+    // its save-location config's preset or folder changes (Phase 3B fixes
+    // nit): an assignment's relative path and derived name only make sense
+    // relative to the preset/folder they were made under.
+    suspend fun clearAllSaveAssignments(fsSlug: String) {
+        context.dataStore.edit { prefs ->
+            val root = allSaveAssignmentsRoot(prefs[Keys.SAVE_UNASSIGNED_ASSIGNMENTS])
+            root.remove(fsSlug)
+            prefs[Keys.SAVE_UNASSIGNED_ASSIGNMENTS] = root.toString()
+        }
+    }
+
+    private fun allSaveAssignmentsRoot(json: String?): JSONObject {
+        if (json.isNullOrBlank()) return JSONObject()
+        return try { JSONObject(json) } catch (_: Exception) { JSONObject() }
     }
 
     // Drops every slot's baseline for a ROM (called from within an existing

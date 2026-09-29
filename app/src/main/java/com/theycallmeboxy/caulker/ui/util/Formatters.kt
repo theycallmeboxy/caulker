@@ -16,3 +16,11 @@ fun buildCoverUrl(serverUrl: String, coverPath: String): String {
         "$base/assets/romm/resources/$coverPath"
     }
 }
+
+// Truncates a long file path from the START (keeping the tail, where the
+// actually-distinguishing folder/file name usually is) instead of Compose's
+// default end-ellipsis, which for a path just shows a long, useless common
+// prefix (save-sync design doc, Part 2 §12 phase 3B fixes nit). No-op for
+// anything already short enough.
+fun ellipsizeStart(path: String, maxChars: Int = 48): String =
+    if (path.length <= maxChars) path else "…" + path.takeLast(maxChars - 1)

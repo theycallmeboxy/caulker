@@ -39,6 +39,35 @@ fun SaveSyncAllScreen(
     val isSyncingAll by viewModel.isSyncingAll.collectAsState()
     val syncingRomIds by viewModel.syncingRomIds.collectAsState()
     val syncProgressLabel by viewModel.syncProgressLabel.collectAsState()
+    val pendingGuardReverts by viewModel.pendingGuardReverts.collectAsState()
+
+    // §7 download guard (Phase 3B): revertAll() held these back because the
+    // incoming save looked like a different, possibly-incompatible emulator
+    // or core -- one dialog covers the whole batch rather than one per row.
+    if (pendingGuardReverts.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = viewModel::dismissGuardedReverts,
+            title = { Text("Different emulator or core") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "These saves were made with a different emulator or core than what's " +
+                            "configured here, and reverting them will overwrite your local saves:"
+                    )
+                    Text(
+                        pendingGuardReverts.joinToString("\n") { "• ${it.romName}" },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = viewModel::confirmGuardedReverts) { Text("Download anyway") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissGuardedReverts) { Text("Skip these") }
+            }
+        )
+    }
 
     // Ask once per screen entry for POST_NOTIFICATIONS so the QS-tile / foreground
     // service progress notification can show. If the user denies, sync still
@@ -218,7 +247,20 @@ private fun RomSyncRow(group: RomSyncGroup, isSyncing: Boolean, onClick: () -> U
             if (isSyncing) {
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             } else {
-                StatusBadge(group.status.syncAction)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // §7 download guard: flags a pending download/revert
+                    // that will need the user's confirmation before it can
+                    // overwrite the local save (see GuardConfirmDialog-style
+                    // handling in the per-game screen and this screen's
+                    // Revert flow).
+                    if (group.status.guardWarning) {
+                        Icon(
+                            Icons.Default.Warning, contentDescription = "Needs confirmation before downloading",
+                            tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    StatusBadge(group.status.syncAction)
+                }
             }
         },
         modifier = Modifier.clickable(onClick = onClick)

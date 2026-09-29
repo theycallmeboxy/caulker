@@ -359,4 +359,101 @@ class ConfiguredSaveWriterTest {
             .orEmpty()
         assertEquals(5, backups.size)
     }
+
+    // --- Phase 3B fixes, blocker 1: a manually assigned unit's download
+    // must land back at the exact file/folder the assignment pointed to,
+    // never at a bare ROM-stem/save_target guess -- and the assigned entry
+    // must never be treated as a stale member to remove. Each test scans
+    // WITH an assignment (resolveSaveLocations, same as
+    // SaveLocationRepository.unitFor) to get the real LocalSaveUnit, then
+    // applies a write using that unit's own matchingKeyName + as
+    // previousUnit -- exactly the end-to-end path matchingKeyNameFor +
+    // download() now follow. Before this fix, matchingKeyName would have
+    // been the ROM's bare stem, the write would have landed at a DIFFERENT
+    // path, and removeStaleMembers would then have backed up and DELETED
+    // the real assigned file as "no longer included" -- these assertions
+    // (the assigned file still exists, with the NEW content, and the
+    // stem-guess path was never created) catch exactly that regression.
+
+    @Test
+    fun `a SINGLE_FILE download for an assigned ROM lands back at the assigned file, not a ROM-stem guess`() = runBlocking {
+        // Owner decision (2026-09-29): manual assignment is EXCHANGE-only --
+        // this preset is EXCHANGE specifically so the assignment below is
+        // actually honored (see SaveLocationResolverTest's DIRECT-ignores-
+        // assignments coverage for the other half of that decision).
+        val singlePreset = SavePreset(
+            key = PresetKey.RetroArchCore("snes", "mgba"), mode = SaveSyncMode.EXCHANGE,
+            shape = SaveShape.SINGLE_FILE, patterns = listOf("{name}.srm"),
+            matchingKey = MatchingKeyKind.ROM_STEM, emulatorId = "mgba"
+        )
+        File(root, "Stray File.srm").writeBytes("old".toByteArray())
+        val configured = ConfiguredPlatform(singlePreset, folderPath())
+        // ROM stem is "Mario" -- rule 1 would look for "Mario.srm", which
+        // doesn't exist; only the assignment can match "Stray File.srm".
+        val games = listOf(GameSaveIdentity(romId = 7, romStem = "Mario"))
+
+        val scanner = AndroidSaveFolderScanner.snapshot(rootHelper, folderPath())
+        val scan = resolveSaveLocations(singlePreset, folderPath(), games, scanner, assignments = mapOf(7 to "Stray File.srm"))
+        val previousUnit = scan.units.single { it.romId == 7 }
+        assertEquals("Stray File", previousUnit.matchingKeyName)
+
+        val outcome = writer.apply(
+            configured, previousUnit.matchingKeyName, "new".toByteArray(), serverFileName = null, previousUnit = previousUnit
+        )
+
+        assertTrue(outcome.success)
+        assertEquals(listOf("Stray File.srm"), outcome.writtenRelativePaths)
+        assertEquals("new", File(root, "Stray File.srm").readText())
+        assertFalse("a ROM-stem guess must never be written for an assigned ROM", File(root, "Mario.srm").exists())
+    }
+
+    @Test
+    fun `a FILE_SET download for an assigned ROM keeps writing to the assigned files, siblings included`() = runBlocking {
+        // EXCHANGE copy of the shared fileSetPreset fixture (owner decision
+        // 2026-09-29: assignment is EXCHANGE-only) -- fileSetPreset itself
+        // stays DIRECT for every other test in this file.
+        val fileSetExchange = fileSetPreset.copy(mode = SaveSyncMode.EXCHANGE)
+        File(root, "Stray.srm").writeBytes("old-srm".toByteArray())
+        File(root, "Stray.rtc").writeBytes("old-rtc".toByteArray())
+        val configured = ConfiguredPlatform(fileSetExchange, folderPath())
+        val games = listOf(GameSaveIdentity(romId = 7, romStem = "NotStray"))
+
+        val scanner = AndroidSaveFolderScanner.snapshot(rootHelper, folderPath())
+        val scan = resolveSaveLocations(fileSetExchange, folderPath(), games, scanner, assignments = mapOf(7 to "Stray.srm"))
+        val previousUnit = scan.units.single { it.romId == 7 }
+        assertEquals("Stray", previousUnit.matchingKeyName)
+        assertEquals(listOf("Stray.rtc", "Stray.srm"), previousUnit.memberPaths) // sibling picked up
+
+        val zip = folderZip("Stray.srm" to "new-srm".toByteArray(), "Stray.rtc" to "new-rtc".toByteArray())
+        val outcome = writer.apply(configured, previousUnit.matchingKeyName, zip, serverFileName = null, previousUnit = previousUnit)
+
+        assertTrue(outcome.success)
+        assertEquals("new-srm", File(root, "Stray.srm").readText())
+        assertEquals("new-rtc", File(root, "Stray.rtc").readText())
+        assertFalse(File(root, "NotStray.srm").exists())
+    }
+
+    @Test
+    fun `a FOLDER download for an assigned ROM lands back at the assigned folder, not a save_target guess`() = runBlocking {
+        // EXCHANGE copy of the shared folderPreset fixture (owner decision
+        // 2026-09-29: assignment is EXCHANGE-only) -- folderPreset itself
+        // stays DIRECT for every other test in this file.
+        val folderExchange = folderPreset.copy(mode = SaveSyncMode.EXCHANGE)
+        File(root, "SomeSave").mkdirs()
+        File(root, "SomeSave/DATA.BIN").writeBytes("old".toByteArray())
+        val configured = ConfiguredPlatform(folderExchange, folderPath())
+        // No saveTarget at all -- rule 2 could never have matched this ROM.
+        val games = listOf(GameSaveIdentity(romId = 3, romStem = "irrelevant", saveTarget = null))
+
+        val scanner = AndroidSaveFolderScanner.snapshot(rootHelper, folderPath())
+        val scan = resolveSaveLocations(folderExchange, folderPath(), games, scanner, assignments = mapOf(3 to "SomeSave"))
+        val previousUnit = scan.units.single { it.romId == 3 }
+        assertEquals("SomeSave", previousUnit.matchingKeyName)
+
+        val zip = folderZip("SomeSave/DATA.BIN" to "new".toByteArray())
+        val outcome = writer.apply(configured, previousUnit.matchingKeyName, zip, serverFileName = null, previousUnit = previousUnit)
+
+        assertTrue(outcome.success)
+        assertEquals("new", File(root, "SomeSave/DATA.BIN").readText())
+    }
 }

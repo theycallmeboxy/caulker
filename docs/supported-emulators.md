@@ -143,7 +143,7 @@ core" below for the full breakdown.
 | N64 | Mupen64Plus-Next, ParaLLEl N64 | ParaLLEl N64 only: core option **Player 1 Pak → Memory** if the game uses the Controller Pak (default is None) | These two write the same save file, so switching between them should work (not yet tested on a device). |
 | PS1 | Beetle PSX / Beetle PSX HW, SwanStation, PCSX ReARMed | PCSX ReARMed only: core option **Memory Card 2 Type → No Memory Card** (default is a card shared by every game) | These three write the same 128 KB memory-card format, so switching between them should work (not yet tested on a device). |
 | Saturn | Beetle Saturn, Yabause | None | These two aren't known to read each other's saves — pick one and stick with it. |
-| Dreamcast | Flycast (RetroArch core) | Core option **Per-Game VMUs → VMU A1** (default shares up to 8 VMU files across every game) | Only port A1 becomes per-game; other VMU ports stay shared and aren't synced. Prefer standalone Flycast (below) if you'd rather this work without a core option change. |
+| Dreamcast | Flycast (RetroArch core) | Core option **Per-Game VMUs → VMU A1** (default shares up to 8 VMU files across every game) | Only port A1 becomes per-game; other VMU ports stay shared and aren't synced. Prefer standalone Flycast (below) if you'd rather this work without a core option change. **Use CHD (or ISO, or a data-track BIN) images** — RomM reads the disc's game ID from those, which Caulker needs to match a save to a game automatically. `.gdi`/`.cdi` games can't be matched automatically and show up in the Unassigned-files list. |
 | PC Engine / PCE-CD | Beetle PCE, Beetle PCE Fast | None | These two write the same save format, so switching between them should work (not yet tested on a device). |
 | Nintendo DS | melonDS DS, melonDS, DeSmuME / DeSmuME 2015 | None | **DeSmuME's save isn't interchangeable with melonDS/melonDS DS's** — pick one and stick with it. |
 | PSP | PPSSPP (core) | None | |
@@ -235,6 +235,10 @@ shared storage:
 - Point Caulker's Dreamcast save folder at wherever the VMU file ends up after the move.
 - Save naming: one file per game, named from the game's disc ID (e.g. `MK-51000`), suffixed
   `_vmu_save_A1.bin`.
+- **Use CHD (or ISO, or a data-track BIN) images.** Caulker matches a Dreamcast save to a
+  game using the disc's game ID, which RomM only reads from those formats. `.gdi`/`.cdi`
+  games can't be matched automatically — Caulker will list their saves in the
+  Unassigned-files screen instead of matching them on its own.
 - Known limitations:
   - Only VMU port A1 becomes per-game. Ports B1/C1/D1 (if a game uses them) stay in shared
     files across every game and aren't synced individually.

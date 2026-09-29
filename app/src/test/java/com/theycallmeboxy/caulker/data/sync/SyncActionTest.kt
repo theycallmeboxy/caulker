@@ -226,4 +226,161 @@ class SyncActionTest {
         )
         assertEquals(SyncAction.UP_TO_DATE, result)
     }
+
+    // --- Phase 3B fixes, blocker 2: "will ask before overwriting" is false
+    // -- a CONFIGURED platform with no baseline must never fall through to
+    // the device_sync branch, even when the server sent a real,
+    // non-placeholder, is_current entry. This is the exact device repro:
+    // NES was synced on the legacy path (a real device_sync exists), the
+    // platform was then configured with a preset on the same folder and the
+    // local file edited -- the baseline has no path (or the wrong one), so
+    // effectiveBaseline() already returns null, but determineSyncAction used
+    // to still consult device_sync and return UPLOAD. ---
+
+    @Test
+    fun `configured platform, no baseline, real is_current device_sync still yields CONFLICT`() {
+        val slot = SaveSlotResponse(hasRemote = true, remoteUpdatedAt = iso(t0))
+        val deviceSync = DeviceSaveSync(deviceId = "this-device", lastSyncedAt = iso(t1), isCurrent = true)
+        val result = determineSyncAction(
+            slot, hasLocalFile = true, localModifiedMs = ms(t1),
+            deviceSync = deviceSync,
+            localHash = "local-changed", remoteHash = "server-hash",
+            baseline = null, isConfiguredPlatform = true
+        )
+        assertEquals(SyncAction.CONFLICT, result)
+    }
+
+    @Test
+    fun `legacy platform, same inputs, still yields UPLOAD (unchanged behavior)`() {
+        val slot = SaveSlotResponse(hasRemote = true, remoteUpdatedAt = iso(t0))
+        val deviceSync = DeviceSaveSync(deviceId = "this-device", lastSyncedAt = iso(t1), isCurrent = true)
+        val result = determineSyncAction(
+            slot, hasLocalFile = true, localModifiedMs = ms(t1),
+            deviceSync = deviceSync,
+            localHash = "local-changed", remoteHash = "server-hash",
+            baseline = null, isConfiguredPlatform = false
+        )
+        assertEquals(SyncAction.UPLOAD, result)
+    }
+
+    @Test
+    fun `configured platform WITH a path-matching baseline still uses the 3-way merge, not a forced CONFLICT`() {
+        val slot = SaveSlotResponse(hasRemote = true, remoteUpdatedAt = iso(t1))
+        val baseline = SyncBaseline(contentHash = "base", resolvedPath = "/saves/nes/Mario.srm")
+        val result = determineSyncAction(
+            slot, hasLocalFile = true, localModifiedMs = ms(t1),
+            localHash = "local-changed", remoteHash = "base",
+            baseline = baseline, isConfiguredPlatform = true
+        )
+        assertEquals(SyncAction.UPLOAD, result)
+    }
+
+    @Test
+    fun `configured platform, equal hashes still yields UP_TO_DATE even with no baseline`() {
+        val slot = SaveSlotResponse(hasRemote = true, remoteUpdatedAt = iso(t0))
+        val result = determineSyncAction(
+            slot, hasLocalFile = true, localModifiedMs = ms(t0),
+            localHash = "same", remoteHash = "same",
+            baseline = null, isConfiguredPlatform = true
+        )
+        assertEquals(SyncAction.UP_TO_DATE, result)
+    }
+
+    // Phase 3B round-2 fixes, should-fix 3: a configured platform with no
+    // baseline and a MISSING hash (remoteHash unknown here) must still ask
+    // rather than let the timestamp fallback silently pick a direction --
+    // local is clearly "newer" by mtime, which used to yield UPLOAD.
+    @Test
+    fun `configured platform, no baseline, missing remote hash still yields CONFLICT, not a timestamp-driven UPLOAD`() {
+        val slot = SaveSlotResponse(hasRemote = true, remoteUpdatedAt = iso(t0))
+        val result = determineSyncAction(
+            slot, hasLocalFile = true, localModifiedMs = ms(t0) + 10_000L,
+            localHash = "local-hash", remoteHash = null,
+            baseline = null, isConfiguredPlatform = true
+        )
+        assertEquals(SyncAction.CONFLICT, result)
+    }
+
+    @Test
+    fun `legacy platform, same missing-hash inputs, still uses the timestamp fallback (unchanged)`() {
+        val slot = SaveSlotResponse(hasRemote = true, remoteUpdatedAt = iso(t0))
+        val result = determineSyncAction(
+            slot, hasLocalFile = true, localModifiedMs = ms(t0) + 10_000L,
+            localHash = "local-hash", remoteHash = null,
+            baseline = null, isConfiguredPlatform = false
+        )
+        assertEquals(SyncAction.UPLOAD, result)
+    }
+
+    // --- needsAttentionInsteadOfSync (blocker 2 / review item 3): the
+    // orchestrator's non-SyncAction equivalent of the same rule, used
+    // directly against a SyncOperation's server_content_hash. ---
+
+    @Test
+    fun `needsAttentionInsteadOfSync is true for differing hashes with no path-matching baseline`() {
+        assertEquals(
+            true,
+            needsAttentionInsteadOfSync(
+                localExists = true, remoteExists = true, localHash = "local", remoteHash = "remote", baseline = null, currentResolvedPath = "/saves/nes/Mario.srm"
+            )
+        )
+    }
+
+    @Test
+    fun `needsAttentionInsteadOfSync is false when hashes match`() {
+        assertEquals(
+            false,
+            needsAttentionInsteadOfSync(
+                localExists = true, remoteExists = true, localHash = "same", remoteHash = "same", baseline = null, currentResolvedPath = "/saves/nes/Mario.srm"
+            )
+        )
+    }
+
+    @Test
+    fun `needsAttentionInsteadOfSync is false with a path-matching baseline`() {
+        val baseline = SyncBaseline(contentHash = "base", resolvedPath = "/saves/nes/Mario.srm")
+        assertEquals(
+            false,
+            needsAttentionInsteadOfSync(
+                localExists = true, remoteExists = true, localHash = "local", remoteHash = "remote", baseline = baseline, currentResolvedPath = "/saves/nes/Mario.srm"
+            )
+        )
+    }
+
+    @Test
+    fun `needsAttentionInsteadOfSync is true when the baseline's recorded path doesn't match`() {
+        val baseline = SyncBaseline(contentHash = "base", resolvedPath = "/saves/nes/Old.srm")
+        assertEquals(
+            true,
+            needsAttentionInsteadOfSync(
+                localExists = true, remoteExists = true, localHash = "local", remoteHash = "remote", baseline = baseline, currentResolvedPath = "/saves/nes/Mario.srm"
+            )
+        )
+    }
+
+    // Phase 3B round-2 fixes, should-fix 3: "unknown counts as ask" -- a
+    // missing hash (e.g. op.serverContentHash absent from a real negotiate
+    // response) with no usable baseline must fail CLOSED (needs attention),
+    // not silently proceed. Round 1 of this function bailed out to false
+    // whenever EITHER hash was null -- that was the fail-open bug.
+    @Test
+    fun `needsAttentionInsteadOfSync is true when a hash is missing and there's no baseline`() {
+        assertEquals(true, needsAttentionInsteadOfSync(true, true, null, "remote", null, "/x"))
+        assertEquals(true, needsAttentionInsteadOfSync(true, true, "local", null, null, "/x"))
+    }
+
+    @Test
+    fun `needsAttentionInsteadOfSync is false when a hash is unknown but a path-matching baseline exists`() {
+        val baseline = SyncBaseline(contentHash = "base", resolvedPath = "/saves/nes/Mario.srm")
+        assertEquals(false, needsAttentionInsteadOfSync(true, true, "local", null, baseline, "/saves/nes/Mario.srm"))
+    }
+
+    // Phase 3B final review blocker: a first upload (no server save) or a
+    // first download (no local save) has nothing to overwrite, so it must
+    // never be held back for attention, baseline or not.
+    @Test
+    fun `needsAttentionInsteadOfSync is false when only one side has a save`() {
+        assertEquals(false, needsAttentionInsteadOfSync(true, false, "local", null, null, "/x"))
+        assertEquals(false, needsAttentionInsteadOfSync(false, true, null, "remote", null, "/x"))
+    }
 }

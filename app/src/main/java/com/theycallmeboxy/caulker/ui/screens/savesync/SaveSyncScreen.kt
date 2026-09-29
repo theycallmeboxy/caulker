@@ -22,14 +22,24 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.theycallmeboxy.caulker.data.saves.SavePresetRegistry
+import com.theycallmeboxy.caulker.data.saves.SaveSyncMode
 import com.theycallmeboxy.caulker.data.sync.SyncAction
 import com.theycallmeboxy.caulker.data.util.formatTimestamp
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
+import com.theycallmeboxy.caulker.ui.util.OnResumeEffect
+import com.theycallmeboxy.caulker.ui.util.ellipsizeStart
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SaveSyncScreen(
     onBack: () -> Unit,
+    // v1 save-location UI (§12 phase 3B): "Choose save file..." for a
+    // configured platform with no local unit yet opens the Unassigned-files
+    // picker targeted at this ROM -- needs both the platform's numeric id
+    // (Screen.UnassignedSaves' route shape, same as PlatformSettings/
+    // Firmware) and this ROM's id.
+    onChooseSaveFile: (platformId: Int, romId: Int) -> Unit = { _, _ -> },
     viewModel: SaveSyncViewModel = hiltViewModel()
 ) {
     val status by viewModel.status.collectAsState()
@@ -40,8 +50,29 @@ fun SaveSyncScreen(
     val isSaveSyncEnrolled by viewModel.isSaveSyncEnrolled.collectAsState()
     val serverSlots by viewModel.serverSlots.collectAsState()
     val isBulkSyncing by viewModel.isBulkSyncing.collectAsState()
+    val platformId by viewModel.platformId.collectAsState()
+    val pendingGuardDownload by viewModel.pendingGuardDownload.collectAsState()
 
     var showSlotDialog by remember { mutableStateOf(false) }
+
+    // Item 6: refresh this screen's status whenever it becomes visible
+    // again -- most importantly, returning from the Unassigned-files screen
+    // after "Choose save file..." assigns this ROM's save, which this
+    // screen otherwise has no way to know about. Round-2 fixes nit: skipped
+    // while a download/upload is actually in flight (status.isSyncing) --
+    // loadStatus() builds a brand-new SlotUiState from scratch, so firing it
+    // mid-operation would reset isSyncing to false and make the screen look
+    // like nothing's happening while the write is still running underneath.
+    OnResumeEffect { if (status?.isSyncing != true) viewModel.loadStatus() }
+
+    if (pendingGuardDownload) {
+        GuardConfirmDialog(
+            incomingEmulator = status?.slot?.emulator,
+            configuredPreset = status?.presetDisplayName,
+            onConfirm = viewModel::confirmGuardedDownload,
+            onDismiss = viewModel::dismissGuardedDownload
+        )
+    }
 
     if (showSlotDialog) {
         SlotDialog(
@@ -143,7 +174,9 @@ fun SaveSyncScreen(
                     onSmartSync = viewModel::smartSync,
                     onKeepLocal = viewModel::keepLocal,
                     onKeepRemote = viewModel::keepRemote,
-                    onToggleTrack = viewModel::toggleTrack
+                    onToggleTrack = viewModel::toggleTrack,
+                    onChooseSaveFile = { platformId?.let { onChooseSaveFile(it, viewModel.currentRomId) } },
+                    onUnassign = viewModel::unassign
                 )
 
                 HorizontalDivider()
@@ -172,7 +205,9 @@ private fun SaveStatusSection(
     onSmartSync: () -> Unit,
     onKeepLocal: () -> Unit,
     onKeepRemote: () -> Unit,
-    onToggleTrack: () -> Unit
+    onToggleTrack: () -> Unit,
+    onChooseSaveFile: () -> Unit,
+    onUnassign: () -> Unit
 ) {
     val context = LocalContext.current
     val slot = state.slot
@@ -251,6 +286,87 @@ private fun SaveStatusSection(
             }
         }
 
+        // v1 save-location UI (§12 phase 3B, item 4): which preset/folder
+        // this platform is configured with, and the unit's member files --
+        // presetDisplayName is only set for a configured platform (see
+        // loadStatus), so this whole block is absent for a legacy one.
+        state.presetDisplayName?.let { presetName ->
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "Save source: $presetName",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    state.configuredFolderPath?.let {
+                        // Nit: ellipsize from the start -- the end of a
+                        // save-folder path (the actually distinguishing
+                        // part) is what should stay visible, not the common
+                        // storage-root prefix every path shares.
+                        Text(
+                            ellipsizeStart(it),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                    }
+                    if (state.unitMemberPaths.isNotEmpty()) {
+                        Text(
+                            state.unitMemberPaths.joinToString(", ") { it.substringAfterLast('/') },
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    // Owner decision (2026-09-29): manual assignment is
+                    // EXCHANGE-only, so "Unassign" only ever makes sense
+                    // there -- state.isManualAssignment is already always
+                    // false for a DIRECT platform (its units never carry
+                    // isAssigned=true, see SaveLocationResolver.kt), but the
+                    // explicit mode check makes that guarantee visible here
+                    // too rather than relying on it implicitly.
+                    if (state.presetMode == SaveSyncMode.EXCHANGE && state.isManualAssignment) {
+                        TextButton(
+                            onClick = onUnassign,
+                            enabled = actionsEnabled,
+                            contentPadding = PaddingValues(horizontal = 0.dp)
+                        ) {
+                            Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Unassign this save file")
+                        }
+                    }
+                }
+            }
+            // Item 5: Exchange mode notice, shown only for this preset's
+            // mode (§1) -- Caulker syncs the exchange folder like any other,
+            // but the user still has to move the save in/out of the
+            // emulator themselves.
+            if (state.presetMode == SaveSyncMode.EXCHANGE) {
+                if (state.message?.startsWith("Downloaded") == true) {
+                    ExchangeNotice("Import this save into your emulator now.")
+                } else if (state.syncAction == SyncAction.UPLOAD) {
+                    ExchangeNotice("Export the save from your emulator first, then upload.")
+                }
+            }
+        }
+
+        // Item 4: a configured EXCHANGE platform with no local unit at all --
+        // offer to point it at an existing unassigned file instead of
+        // leaving the user stuck with no download/upload action. Owner
+        // decision (2026-09-29): DIRECT is automatic-only -- for a DIRECT
+        // platform with no local unit, nothing extra is shown here; the
+        // normal Download action (or, for a SAVE_TARGET preset with no
+        // save_target, the specific error from matchingKeyNameErrorFor)
+        // applies instead.
+        if (state.presetMode == SaveSyncMode.EXCHANGE && !state.hasLocalFile) {
+            OutlinedButton(onClick = onChooseSaveFile, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.AutoMirrored.Filled.InsertDriveFile, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Choose save file…")
+            }
+        }
+
         state.backupInfo?.let { backup ->
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -296,6 +412,28 @@ private fun SaveStatusSection(
             }
 
             SyncAction.DOWNLOAD -> {
+                // §7 download guard: the incoming save was made with a
+                // possibly-incompatible emulator/core -- shown here so the
+                // warning is visible before the user taps the button (which
+                // then opens the confirmation dialog instead of downloading
+                // straight away, see viewModel.smartSync/GuardConfirmDialog).
+                if (state.guardWarning) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Warning, null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            "This save was made with a different emulator or core — confirm before downloading.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
                 Button(
                     onClick = onSmartSync,
                     enabled = actionsEnabled,
@@ -340,6 +478,16 @@ private fun SaveStatusSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // §7 download guard: "Keep Remote" is also a download, so it
+                // gets the same up-front warning as SyncAction.DOWNLOAD above.
+                if (state.guardWarning) {
+                    Text(
+                        "The server's version was made with a different emulator or core — " +
+                            "\"Keep Remote\" will ask you to confirm.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = onKeepLocal,
@@ -426,6 +574,62 @@ private fun TimestampLabel(label: String, value: String) {
         )
         Text(value, style = MaterialTheme.typography.bodySmall)
     }
+}
+
+// Item 5 -- Exchange mode's "needs importing"/"export first" reminder. Kept
+// short per this task's instructions.
+@Composable
+private fun ExchangeNotice(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(
+            Icons.Default.Info,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+// §7 download guard confirmation (item 6). Every text-carrying element is a
+// standard Material3 AlertDialog with two TextButtons/Button -- focusable and
+// D-pad operable by default, same as every other dialog in this screen
+// (SlotDialog below).
+@Composable
+private fun GuardConfirmDialog(
+    incomingEmulator: String?,
+    configuredPreset: String?,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    // item 6: "names both emulators in plain words" -- the incoming save's
+    // raw emulator id (§7's upload id table) is looked up against the
+    // registry's own display names; an id Caulker doesn't recognize (a
+    // standalone emulator, or a core outside v1) falls back to the raw id
+    // rather than hiding it.
+    val incomingName = SavePresetRegistry.displayNameForEmulatorId(incomingEmulator) ?: incomingEmulator
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Different emulator or core") },
+        text = {
+            Text(
+                "This save was made with " + (incomingName?.let { "\"$it\"" } ?: "a different emulator") +
+                    ", which may not be compatible with " +
+                    (configuredPreset?.let { "your configured \"$it\"" } ?: "what's configured on this device") +
+                    ". Downloading it may overwrite your local save with one it can't read."
+            )
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) { Text("Download anyway") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 private const val NEW_SLOT_SENTINEL = "__new__"

@@ -40,3 +40,17 @@ fun downloadGuardDecision(
         DownloadGuardDecision.WARN_INCOMPATIBLE
     }
 }
+
+// Convenience combining the DOWNLOAD_GUARD_ENABLED flag with
+// downloadGuardDecision, so every caller that needs "does this incoming save
+// need a guard prompt right now" -- SaveLocationRepository.download()'s own
+// internal check, and a ViewModel deciding up front whether to show the
+// confirmation dialog before even attempting a download -- shares one
+// definition instead of two copies of the same three checks (the flag, the
+// decision, and comparing it against WARN_INCOMPATIBLE).
+fun downloadNeedsGuardConfirmation(
+    incomingEmulatorId: String?,
+    configuredEmulatorId: String?,
+    compatibility: FormatCompatibility = SaveFormatFamilies.build()
+): Boolean = DOWNLOAD_GUARD_ENABLED &&
+    downloadGuardDecision(incomingEmulatorId, configuredEmulatorId, compatibility) == DownloadGuardDecision.WARN_INCOMPATIBLE

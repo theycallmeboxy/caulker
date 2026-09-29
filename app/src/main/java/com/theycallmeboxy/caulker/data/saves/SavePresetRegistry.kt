@@ -55,6 +55,23 @@ object SavePresetRegistry {
     fun presetFor(fsSlug: String?, key: PresetKey): SavePreset? =
         presetsForPlatform(fsSlug).firstOrNull { it.preset.key == key }?.preset
 
+    // Human display name for an emulator id (§7's id table), e.g.
+    // "mednafen_saturn" -> "Beetle Saturn" -- used by the download guard's
+    // confirmation prompt (item 6: "names both emulators in plain words")
+    // to show the INCOMING save's emulator by name, not its raw wire id.
+    // Returns null for an id not in this registry (a standalone emulator's
+    // id, or a RetroArch core outside v1's table) -- the caller falls back
+    // to the raw id, which is still better than nothing for an id Caulker
+    // doesn't otherwise know a friendly name for.
+    fun displayNameForEmulatorId(emulatorId: String?): String? {
+        emulatorId ?: return null
+        return DISPLAY_NAME_BY_EMULATOR_ID[emulatorId]
+    }
+
+    private val DISPLAY_NAME_BY_EMULATOR_ID: Map<String, String> by lazy {
+        PRESETS_BY_SYSTEM.values.flatten().associate { it.preset.emulatorId to it.coreDisplayName }
+    }
+
     // --- Builders -----------------------------------------------------
     // Small helpers so each system's preset list below reads like the
     // §10.x table it's transcribed from, instead of repeating SavePreset's

@@ -99,4 +99,7 @@ dependencies {
     implementation(libs.libsu.core)
 
     testImplementation(libs.junit)
+    // Real org.json impl for JVM unit tests -- see libs.versions.toml's own
+    // comment on this entry.
+    testImplementation(libs.json)
 }

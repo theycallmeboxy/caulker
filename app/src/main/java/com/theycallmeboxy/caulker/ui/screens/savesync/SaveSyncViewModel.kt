@@ -11,6 +11,8 @@ import com.theycallmeboxy.caulker.data.repository.ConfiguredPlatform
 import com.theycallmeboxy.caulker.data.repository.RomRepository
 import com.theycallmeboxy.caulker.data.repository.SaveLocationRepository
 import com.theycallmeboxy.caulker.data.repository.SaveRepository
+import com.theycallmeboxy.caulker.data.saves.SavePresetRegistry
+import com.theycallmeboxy.caulker.data.saves.SaveSyncMode
 import com.theycallmeboxy.caulker.data.saves.resolvedPathFor
 import com.theycallmeboxy.caulker.data.sync.SaveSyncLock
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOrchestrator
@@ -43,7 +45,23 @@ data class SlotUiState(
     val isError: Boolean = false,
     val isUntracked: Boolean = false,
     val backupInfo: BackupInfo? = null,
-    val localFilePath: String? = null
+    val localFilePath: String? = null,
+    // v1 save-location UI (§12 phase 3B) -- all null/default/empty for an
+    // unconfigured (legacy) platform, exactly like resolvedPath above.
+    // guardWarning: true when the pending DOWNLOAD/CONFLICT action's
+    // incoming save is a known-incompatible format for the configured
+    // preset (§7) -- computed at load time (not just at download time) so
+    // the screen can show the warning before the user even taps anything.
+    val guardWarning: Boolean = false,
+    val presetMode: SaveSyncMode? = null,
+    val presetDisplayName: String? = null,
+    val configuredFolderPath: String? = null,
+    val unitMemberPaths: List<String> = emptyList(),
+    // True when this ROM's local save came from a manual Unassigned-files
+    // assignment (§3 rule 3) rather than a rule-based match -- offers an
+    // "Unassign" affordance the screen shows instead of pretending it's an
+    // ordinary rule match.
+    val isManualAssignment: Boolean = false
 )
 
 @HiltViewModel
@@ -62,12 +80,35 @@ class SaveSyncViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val romId: Int = checkNotNull(savedStateHandle["romId"])
+    // Public, read-only re-export of the constructor-captured romId -- the
+    // screen needs it (unchanged from the SavedStateHandle-derived value
+    // above) to build the Unassigned-files "Choose save file..." nav route,
+    // which needs both this and platformId together (see that StateFlow's
+    // own doc comment).
+    val currentRomId: Int get() = romId
     private var platformFsSlug: String? = null
     private var romFileName: String? = null
     private var romEntity: RomEntity? = null
 
     private val _romName = MutableStateFlow("")
     val romName = _romName.asStateFlow()
+
+    // This ROM's numeric platform id (Room entity id, not fs slug) -- null
+    // until the ROM itself has loaded. Only consumed by the screen to build
+    // the "Choose save file..." nav route into the Unassigned-files screen
+    // (Screen.UnassignedSaves needs a platformId, same as PlatformSettings/
+    // Firmware's routes).
+    private val _platformId = MutableStateFlow<Int?>(null)
+    val platformId: StateFlow<Int?> = _platformId.asStateFlow()
+
+    // §7 download guard, Phase 3B: true while the user needs to confirm
+    // "Download anyway" for the currently pending download/conflict action
+    // (status.value.guardWarning was true when they tapped it). The screen
+    // shows a confirmation dialog while this is true; confirmGuardedDownload
+    // proceeds with confirmedSaveId=state.saveId, dismissGuardedDownload
+    // just closes it.
+    private val _pendingGuardDownload = MutableStateFlow(false)
+    val pendingGuardDownload: StateFlow<Boolean> = _pendingGuardDownload.asStateFlow()
 
     // The server slot this device's local save maps to. "default" unless the user
     // picked a specific slot via the advanced override.
@@ -105,6 +146,7 @@ class SaveSyncViewModel @Inject constructor(
             platformFsSlug = rom?.platformFsSlug
             romFileName = rom?.fileName
             _romName.value = rom?.name ?: ""
+            _platformId.value = rom?.platformId
             loadStatus()
         }
     }
@@ -190,24 +232,52 @@ class SaveSyncViewModel @Inject constructor(
                     prefsStore.getSyncBaseline(romId, target), resolvedPath,
                     requirePathRecorded = configured != null
                 )
+                val syncAction = determineSyncAction(
+                    slotResponse, hasLocal, localMs, deviceSync,
+                    localHash = localHash, remoteHash = save?.contentHash,
+                    baseline = baseline, isConfiguredPlatform = configured != null
+                )
+                // §7 download guard (Phase 3B): only meaningful for the two
+                // actions that can actually overwrite the local file with
+                // the incoming save (nit: "show the guard icon only on rows
+                // that will actually download").
+                val guardWarning = configured != null &&
+                    (syncAction == SyncAction.DOWNLOAD || syncAction == SyncAction.CONFLICT) &&
+                    saveLocationRepository.downloadGuardWarningFor(configured, save?.emulator)
+                // Preset display name + Exchange-mode notice (item 4/5) --
+                // looked up from the registry's own display metadata, not
+                // just the bare SavePreset the resolver works with.
+                val presetInfo = configured?.let { c ->
+                    SavePresetRegistry.presetsForPlatform(platformFsSlug).firstOrNull { it.preset.key == c.preset.key }
+                }
+                // Round-2 fixes (blocker-1 follow-on): read straight off the
+                // CURRENT unit's own isAssigned flag, not the raw PrefsStore
+                // record -- a record can go stale (its target entry gets
+                // rule-matched by a different ROM) without being deleted,
+                // and this must stop looking "active" the moment that
+                // happens, not just after the next failed download attempt
+                // clears the record.
+                val isManualAssignment = configuredUnit?.second?.isAssigned == true
                 _status.value = SlotUiState(
                     slot = slotResponse,
                     fileName = localFileName,
                     saveId = save?.id,
                     hasLocalFile = hasLocal,
                     localModifiedMs = localMs,
-                    syncAction = determineSyncAction(
-                        slotResponse, hasLocal, localMs, deviceSync,
-                        localHash = localHash, remoteHash = save?.contentHash,
-                        baseline = baseline
-                    ),
+                    syncAction = syncAction,
                     isUntracked = deviceSync?.isUntracked ?: false,
                     backupInfo = if (configured == null) {
                         localFileName?.let { saveRepository.getBackupInfo(it, platformFsSlug) }
                     } else null, // TODO(phase-3-UI): per-member backup info for a configured platform
                     localFilePath = if (configured == null) {
                         localFileName?.let { saveRepository.getLocalFilePath(it, platformFsSlug) }
-                    } else resolvedPath
+                    } else resolvedPath,
+                    guardWarning = guardWarning,
+                    presetMode = configured?.preset?.mode,
+                    presetDisplayName = presetInfo?.coreDisplayName,
+                    configuredFolderPath = configured?.folderPath,
+                    unitMemberPaths = configuredUnit?.second?.memberPaths ?: emptyList(),
+                    isManualAssignment = isManualAssignment
                 )
             } catch (e: CancellationException) {
                 throw e
@@ -250,7 +320,7 @@ class SaveSyncViewModel @Inject constructor(
     fun smartSync() {
         val state = _status.value ?: return
         when (state.syncAction) {
-            SyncAction.DOWNLOAD -> download(state)
+            SyncAction.DOWNLOAD -> downloadOrConfirmGuard(state)
             SyncAction.UPLOAD -> upload(state)
             else -> {}
         }
@@ -259,7 +329,57 @@ class SaveSyncViewModel @Inject constructor(
     // Conflict "Keep Local": the server has a newer save, so force overwrite —
     // otherwise the upload 409s and the conflict just re-appears.
     fun keepLocal() { _status.value?.let { upload(it, overwrite = true) } }
-    fun keepRemote() { _status.value?.let { download(it) } }
+    fun keepRemote() { _status.value?.let { downloadOrConfirmGuard(it) } }
+
+    // §7 download guard (Phase 3B): routes a download through the
+    // confirmation dialog when the pending state was already flagged
+    // guardWarning at load time (see loadStatus), instead of downloading
+    // straight away. Shared by smartSync's DOWNLOAD case and keepRemote,
+    // since both can overwrite the local file with a possibly-incompatible
+    // incoming save.
+    private fun downloadOrConfirmGuard(state: SlotUiState) {
+        if (state.guardWarning) _pendingGuardDownload.value = true else download(state)
+    }
+
+    // User confirmed "Download anyway" on the guard dialog -- proceed with
+    // the same pending state. The confirmation is tied to the specific save
+    // id shown in the dialog (state.saveId) -- if a refetch inside
+    // download() turns up a DIFFERENT save (someone else uploaded in the
+    // meantime), the guard fires again instead of silently trusting a
+    // confirmation that was about a different save (Phase 3B fixes nit).
+    fun confirmGuardedDownload() {
+        _pendingGuardDownload.value = false
+        _status.value?.let { download(it, confirmedSaveId = it.saveId) }
+    }
+
+    fun dismissGuardedDownload() {
+        _pendingGuardDownload.value = false
+    }
+
+    // §3 rule 3: reverses a manual Unassigned-file assignment for this ROM.
+    // The file itself is untouched -- it just goes back to "unassigned" on
+    // this platform's next scan. Item 4: respects the same SaveSyncLock
+    // every other mutation does, so it can't race a bulk sync's own
+    // negotiate/execute pass reading the assignment map mid-change.
+    fun unassign() {
+        val slug = platformFsSlug ?: return
+        viewModelScope.launch {
+            if (!saveSyncLock.mutex.tryLock()) {
+                setStatus { it.copy(message = lockedMessage, isError = true) }
+                return@launch
+            }
+            try {
+                saveLocationRepository.clearAssignment(slug, romId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                setStatus { it.copy(message = e.message ?: "Failed to unassign", isError = true) }
+            } finally {
+                saveSyncLock.mutex.unlock()
+            }
+            loadStatus()
+        }
+    }
 
     // RomM 4.9: pause/resume sync tracking for this save on this device. A paused
     // (untracked) save is treated as no-op by the server's sync negotiation.
@@ -296,7 +416,7 @@ class SaveSyncViewModel @Inject constructor(
     // action can't proceed right now.
     private val lockedMessage = "Save sync in progress — try again when it finishes"
 
-    private fun download(state: SlotUiState) {
+    private fun download(state: SlotUiState, confirmedSaveId: Int? = null) {
         val slotKey = state.slot.slotKey
         viewModelScope.launch {
             if (!saveSyncLock.mutex.tryLock()) {
@@ -312,7 +432,7 @@ class SaveSyncViewModel @Inject constructor(
 
                 val configured = saveLocationRepository.configuredPlatform(platformFsSlug)
                 if (configured != null) {
-                    downloadConfigured(configured, save, slotKey)
+                    downloadConfigured(configured, save, slotKey, confirmedSaveId)
                 } else {
                     downloadLegacy(save, slotKey)
                 }
@@ -366,23 +486,51 @@ class SaveSyncViewModel @Inject constructor(
     private suspend fun downloadConfigured(
         configured: ConfiguredPlatform,
         save: com.theycallmeboxy.caulker.data.api.model.SaveResponse,
-        slotKey: String
+        slotKey: String,
+        confirmedSaveId: Int? = null
     ) {
-        // preset-aware: SAVE_TARGET-matched presets (Dreamcast, PSP) key on
-        // RomEntity.saveTarget, not the ROM filename.
-        val matchingKeyName = romEntity?.let { saveLocationRepository.matchingKeyNameFor(configured.preset, it) }
-            ?: error("Cannot resolve a matching-key name for this ROM")
-        // The unit as it stood before this download, so SaveLocationRepository
-        // can clean up any stale member the new content doesn't include (§12
-        // phase 3 fixes item 3) -- a scan failure here propagates as a real
-        // error (caught by download()'s own try/catch above), not "no local
-        // save."
-        val previousUnit = romEntity?.let { saveLocationRepository.unitFor(it) }?.second
+        val rom = romEntity ?: error("ROM not loaded")
+        // Blocker 1 (round 2): resolveDownloadTarget is the single source of
+        // truth for where a download lands -- a unit's own matchingKeyName
+        // when one exists, a stale-assignment refusal (never a guess) when
+        // it doesn't, or the bare preset guess as a last resort. See its own
+        // doc comment for why matchingKeyNameFor+unitFor separately (round 1)
+        // was unsafe.
+        val target = saveLocationRepository.resolveDownloadTarget(configured, rom)
+        val (matchingKeyName, previousUnit) = when (target) {
+            is SaveLocationRepository.DownloadTarget.Resolved -> target.matchingKeyName to target.previousUnit
+            is SaveLocationRepository.DownloadTarget.Refused -> {
+                setStatus { it.copy(isSyncing = false, message = target.reason, isError = true) }
+                return
+            }
+        }
         val outcome = saveLocationRepository.download(
             configured, matchingKeyName, save.id, save.fileName,
-            incomingEmulatorId = save.emulator, previousUnit = previousUnit
+            incomingEmulatorId = save.emulator, previousUnit = previousUnit, confirmedSaveId = confirmedSaveId
         )
         if (!outcome.success) {
+            if (outcome.guardWarning) {
+                // Round-2 fixes, should-fix 4: the confirmed save id no
+                // longer matches this download's (a refetch returned a
+                // DIFFERENT save) -- update status to the NEWLY fetched
+                // save's id/emulator before re-prompting, so the NEXT
+                // confirm attempt is tied to the save that's actually
+                // pending now. Without this the dialog kept re-showing the
+                // OLD saveId/emulator forever, and every confirm attempt
+                // re-fetched a save whose id never matched the stale
+                // confirmedSaveId -- an infinite reprompt loop. Never shows
+                // the raw "download guard: ..." string (nit).
+                setStatus {
+                    it.copy(
+                        isSyncing = false,
+                        guardWarning = true,
+                        saveId = save.id,
+                        slot = it.slot.copy(emulator = save.emulator, remoteUpdatedAt = save.updatedAt, hasRemote = true)
+                    )
+                }
+                _pendingGuardDownload.value = true
+                return
+            }
             // Nothing was written (or a partial write was rolled back) --
             // never record a baseline for a failed/refused download.
             setStatus { it.copy(isSyncing = false, message = outcome.reason, isError = true) }
@@ -408,7 +556,9 @@ class SaveSyncViewModel @Inject constructor(
                 message = "Downloaded $matchingKeyName",
                 isError = false,
                 fileName = matchingKeyName,
-                localFilePath = resolvedPath
+                localFilePath = resolvedPath,
+                guardWarning = false,
+                unitMemberPaths = outcome.writtenRelativePaths
             )
         }
     }

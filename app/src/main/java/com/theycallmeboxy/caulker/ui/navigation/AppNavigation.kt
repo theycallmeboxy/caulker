@@ -19,6 +19,7 @@ import com.theycallmeboxy.caulker.ui.screens.savesync.SaveSyncScreen
 import com.theycallmeboxy.caulker.ui.screens.settings.SettingsScreen
 import com.theycallmeboxy.caulker.ui.screens.setup.SetupScreen
 import com.theycallmeboxy.caulker.ui.screens.sync.SyncProgressScreen
+import com.theycallmeboxy.caulker.ui.screens.unassignedsaves.UnassignedFilesScreen
 
 sealed class Screen(val route: String) {
     object Login : Screen("login")
@@ -44,6 +45,13 @@ sealed class Screen(val route: String) {
     }
     object SyncProgress : Screen("sync_progress")
     object Collections : Screen("collections")
+    // v1 save-location UI (§12 phase 3B, items 3/4): forRomId is optional --
+    // absent (browse mode, from platform settings' setup warnings) or a
+    // specific ROM (from SaveSyncScreen's "Choose save file...").
+    object UnassignedSaves : Screen("unassigned_saves/{platformId}?forRomId={forRomId}") {
+        fun route(platformId: Int, forRomId: Int? = null) =
+            "unassigned_saves/$platformId" + (forRomId?.let { "?forRomId=$it" } ?: "")
+    }
 }
 
 @Composable
@@ -127,7 +135,10 @@ fun AppNavigation(startDestination: String) {
             arguments = listOf(navArgument("romId") { type = NavType.IntType })
         ) { back ->
             SaveSyncScreen(
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onChooseSaveFile = { platformId, romId ->
+                    navController.navigate(Screen.UnassignedSaves.route(platformId, romId))
+                }
             )
         }
 
@@ -160,7 +171,20 @@ fun AppNavigation(startDestination: String) {
             val platformId = back.arguments!!.getInt("platformId")
             PlatformSettingsScreen(
                 onBack = { navController.popBackStack() },
-                onFirmwareClick = { navController.navigate(Screen.Firmware.route(platformId)) }
+                onFirmwareClick = { navController.navigate(Screen.Firmware.route(platformId)) },
+                onUnassignedFilesClick = { navController.navigate(Screen.UnassignedSaves.route(platformId)) }
+            )
+        }
+
+        composable(
+            route = Screen.UnassignedSaves.route,
+            arguments = listOf(
+                navArgument("platformId") { type = NavType.IntType },
+                navArgument("forRomId") { type = NavType.IntType; defaultValue = -1 }
+            )
+        ) {
+            UnassignedFilesScreen(
+                onBack = { navController.popBackStack() }
             )
         }
 

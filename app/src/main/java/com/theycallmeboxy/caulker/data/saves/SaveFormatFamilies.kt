@@ -59,10 +59,15 @@ object SaveFormatFamilies {
 }
 
 // Gates the download guard's wiring into the actual download path (§7's
-// "planned" status -- the decision logic itself has been real since Phase 1,
-// but nothing calls it in front of a real download until the UI phase turns
-// this on with its confirmation prompt, per this task's instructions). A
-// later phase flips this to true alongside shipping that prompt; until then
-// downloadGuardDecision() is computed (Phase 3A wires it in, gated) but
-// never blocks a download on its own.
-const val DOWNLOAD_GUARD_ENABLED = false
+// "planned" status -- the decision logic itself has been real since Phase 1).
+// Phase 3B (this task) ships the confirmation prompt this gate was waiting
+// on -- SaveLocationRepository.download() still makes the final ALLOW/WARN
+// call (via downloadNeedsGuardConfirmation, SaveDownloadGuard.kt), but every
+// interactive caller (SaveSyncViewModel's per-game screen, SaveSyncAllViewModel's
+// bulk Revert) now offers "Download anyway" to bypass a WARN_INCOMPATIBLE
+// result, and the non-interactive callers (SaveSyncOrchestrator, driving both
+// the in-app "Sync All" button and the QS tile / foreground service) never
+// prompt -- a guard hit there just skips that ROM's download and leaves its
+// sync status showing "needs attention" on the next load, per this task's
+// explicit instruction that the background path must not show UI.
+const val DOWNLOAD_GUARD_ENABLED = true
