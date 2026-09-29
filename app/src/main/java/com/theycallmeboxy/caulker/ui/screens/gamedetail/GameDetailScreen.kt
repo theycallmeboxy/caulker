@@ -52,6 +52,8 @@ fun GameDetailScreen(
 
         val game = rom!!
         val isDownloading = downloadState is DownloadState.Downloading
+        val isQueued = downloadState is DownloadState.Queued
+        val downloadBusy = isDownloading || isQueued
 
         Column(
             modifier = Modifier
@@ -98,17 +100,17 @@ fun GameDetailScreen(
                 when (localFileState) {
                     is LocalFileState.Present -> {
                         OutlinedButton(
-                            onClick = { viewModel.download() },
-                            enabled = !isDownloading,
+                            onClick = { viewModel.reDownload() },
+                            enabled = !downloadBusy,
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Re-download")
+                            Text(if (isQueued) "Queued…" else "Re-download")
                         }
                         OutlinedButton(
                             onClick = { viewModel.deleteLocalFile() },
-                            enabled = !isDownloading,
+                            enabled = !downloadBusy,
                             colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error
                             ),
@@ -122,12 +124,18 @@ fun GameDetailScreen(
                     LocalFileState.Missing -> {
                         Button(
                             onClick = { viewModel.download() },
-                            enabled = !isDownloading,
+                            enabled = !downloadBusy,
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text(if (isDownloading) "Downloading…" else "Download")
+                            Text(
+                                when {
+                                    isDownloading -> "Downloading…"
+                                    isQueued -> "Queued…"
+                                    else -> "Download"
+                                }
+                            )
                         }
                     }
                 }
@@ -148,6 +156,12 @@ fun GameDetailScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                DownloadState.Queued -> Text(
+                    "Another download is in progress — this one is queued",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
                 )
                 is DownloadState.Error -> Text(
                     ds.message,

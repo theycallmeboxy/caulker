@@ -182,7 +182,8 @@ class GamesViewModel @Inject constructor(
 
     fun installSelected() {
         val ids = _selectedIds.value.toList()
-        if (ids.isEmpty() || downloadOrchestrator.isRunning()) return
+        if (ids.isEmpty()) return
+        // Queues behind any download already running (DownloadOrchestrator.download).
         downloadOrchestrator.download("Selected games", ids)
         DownloadForegroundService.start(context)
         exitSelection()

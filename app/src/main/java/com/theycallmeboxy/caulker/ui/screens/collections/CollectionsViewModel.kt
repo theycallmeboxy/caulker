@@ -91,7 +91,7 @@ class CollectionsViewModel @Inject constructor(
     }
 
     fun downloadCollection(name: String, romIds: List<Int>) {
-        if (downloadOrchestrator.isRunning()) return
+        // Queues behind any download already running (DownloadOrchestrator.download).
         downloadOrchestrator.download(name, romIds)
         // Foreground service keeps the process alive and shows a progress
         // notification with a cancel action while the app-scoped orchestrator runs.

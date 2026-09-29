@@ -81,7 +81,12 @@ class DownloadForegroundService : android.app.Service() {
                     NotificationChannels.DOWNLOAD_NOTIFICATION_ID,
                     buildFinalNotification(title = "${state.label} downloaded", body = body)
                 )
-                stopAndCleanup()
+                // A queued request is about to start (DownloadOrchestrator drains
+                // its queue before this coroutine's job actually ends) -- stay in
+                // the foreground so its Downloading state overwrites this
+                // notification instead of the service tearing itself down and a
+                // new one having to be started.
+                if (!state.hasMore) stopAndCleanup()
             }
             is BulkDownloadState.Error -> {
                 nm.notify(
