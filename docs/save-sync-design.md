@@ -135,23 +135,41 @@ for folder/multi-file saves, so a save zipped by Caulker is readable by them and
 versa, and Caulker can read zips they produced:
 
 - Standard DEFLATE zip (Java's built-in zip writer produces a compatible file).
-- **Single-root archives** (one FOLDER save, or a FILE_SET that collapses to one save
-  unit): the top-level directory name is the save id itself; it has no separate,
-  explicit directory zip entry — it exists only as the path prefix on every child entry.
-- **Multi-root archives** (a FILE_SET whose members live in genuinely different
-  directories, or a FOLDER save bundled alongside sibling matched folders — e.g. PSP's
-  prefix-matched siblings): each root **does** get its own explicit top-level directory
-  entry, written before its contents.
+- **FILE_SET archives are flat**: every member is stored under its bare filename, with no
+  directory prefix, even when the members live in different subfolders on disk (e.g. MAME
+  2003-Plus `nvram/{name}.nv` + `hi/{name}.hi` zip as `{name}.nv` + `{name}.hi`). This is
+  what Argosy writes (`SaveArchiver.zipFiles`). On unpack, each member is placed at the
+  preset pattern whose resolved basename matches it; a member matching no pattern is
+  skipped and reported (another client's bundle may carry files the local core doesn't
+  use); if nothing is placed, the unpack is refused. Two patterns resolving to the same
+  basename is a preset error, rejected at both pack and unpack.
+- **FOLDER archives, single root** (one folder save): the top-level directory name is the
+  save's folder name; it has no explicit directory zip entry of its own — it exists only
+  as the path prefix on every child entry. Nested subdirectories below it do get explicit
+  entries, as Argosy's recursive folder zip writes them.
+- **FOLDER archives, multi-root** (a folder save bundled with sibling matched folders —
+  e.g. PSP's prefix-matched siblings): each root **does** get its own explicit top-level
+  directory entry, written before its contents.
 - **No manifest file** — no sidecar JSON/text entry, ever. An empty result (zero files
   written) aborts the operation rather than uploading an empty or root-only zip.
-- On download, before unpacking, Caulker verifies the archive's root entry name(s) against
-  the expected save id, in tiers: **exact match → prefix match → contains match**; no
-  match at any tier refuses the unpack rather than guessing. This mirrors the tiered
-  matcher other RomM clients use and is the same safety property applied to save
-  *content* that §4 below applies to save *location*: never write into the wrong game's
-  save on ambiguous evidence.
-- Path-traversal guard: reject any entry whose extracted path would escape the target
-  directory.
+- **Content hash**: RomM stores a zip's `content_hash` as the md5 of its sorted
+  `name:md5-of-entry` lines, not of the zip bytes (`hash_zip_contents`; Argosy's
+  `calculateZipHash` is identical). Caulker computes the same value for a local
+  FILE_SET/FOLDER save directly from the files on disk, using the entry names it would
+  pack, so zipped saves compare correctly in the sync decision without packing first.
+  `tools/romm_zip_hash_kat.py` reproduces the known-answer test values.
+- On download of a FOLDER archive, before unpacking, Caulker verifies the archive's root
+  name(s) against the expected save id, in tiers: **exact match → prefix match →
+  contains match**; no match at any tier refuses the unpack rather than guessing. Every
+  root of a multi-root archive must match (stricter than Argosy, which accepts any one
+  matching root, because Caulker's multi-root archives are always one save's sibling
+  folders). Comparison is case- and punctuation-sensitive, unlike Argosy's normalized
+  compare, since Caulker's save id can be an arbitrary ROM stem; revisit with phase 4
+  preset data. This is the same safety property applied to save *content* that §5 applies
+  to save *location*: never write into the wrong game's save on ambiguous evidence.
+- Path-traversal and size guards: reject the whole archive if any entry's extracted path
+  would escape the target directory, or if it exceeds 20,000 entries or 512 MiB
+  decompressed (RomM's own per-entry cap is also 512 MiB).
 
 ### 3. Matching files to games
 
@@ -566,7 +584,9 @@ whether the core is in scope for v1 (Supported) or excluded (Not supported).
   onto a melonDS-configured device, Beetle Saturn onto Yabause), silent overwrite for a
   known-interchangeable pair, and silent overwrite (today's behavior, unchanged) for an
   unknown id, a null tag, or `"caulker"`.
-- **Zip (phase 2)**: single-root and multi-root pack/unpack round-trips; root-verification
+- **Zip (phase 2)**: flat FILE_SET (including subfolder placement and skipped extras) and
+  single-/multi-root FOLDER pack/unpack round-trips; content hash known-answer tests
+  against RomM's algorithm and pack-then-hash == hash-directly; root-verification
   tiers (exact/prefix/contains/no-match refusal) against synthetic archives, including
   archives shaped like what other RomM clients produce, to confirm read-compatibility;
   path-traversal rejection; empty-result abort.
