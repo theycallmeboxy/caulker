@@ -8,6 +8,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.theycallmeboxy.caulker.data.saves.SavePlatformConfig
+import com.theycallmeboxy.caulker.data.saves.presetKeyFromJsonObject
+import com.theycallmeboxy.caulker.data.saves.toJsonObject
 import com.theycallmeboxy.caulker.data.sync.SyncBaseline
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -46,6 +49,7 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
         val SAVE_SYNC_ENROLLED = stringPreferencesKey("save_sync_enrolled")
         val SAVE_SYNC_SLOT_PREFS = stringPreferencesKey("save_sync_slot_prefs")
         val SAVE_SYNC_BASELINE = stringPreferencesKey("save_sync_baseline")
+        val SAVE_PLATFORM_CONFIGS = stringPreferencesKey("save_platform_configs")
         val INSECURE_SKIP_VERIFY = booleanPreferencesKey("insecure_skip_verify")
         val GLOBAL_ROM_SYNC_TIME = longPreferencesKey("global_rom_sync_time")
     }
@@ -194,6 +198,69 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
     }
 
     private fun baselineKey(romId: Int, slotKey: String) = "$romId:$slotKey"
+
+    // --- Per-platform save-location config (save-sync design doc, Part 2 §12
+    // phase 3) -- the preset + folder a user has chosen for a platform's save
+    // sync, keyed by fs slug. No entry (the default for every platform) means
+    // legacy resolution: effectiveSaveDir + resolveLocalSaveFileName, exactly
+    // as before this existed (§6) -- see SaveRepository/SaveSyncOrchestrator's
+    // configured-vs-legacy branch, which treats a null result from
+    // getSavePlatformConfig identically to "phase 3A never shipped."
+    val savePlatformConfigs: Flow<Map<String, SavePlatformConfig>> = context.dataStore.data.map { prefs ->
+        parseSavePlatformConfigs(prefs[Keys.SAVE_PLATFORM_CONFIGS])
+    }
+
+    fun savePlatformConfig(fsSlug: String): Flow<SavePlatformConfig?> =
+        savePlatformConfigs.map { it[fsSlug] }
+
+    suspend fun getSavePlatformConfig(fsSlug: String?): SavePlatformConfig? {
+        if (fsSlug.isNullOrBlank()) return null
+        return savePlatformConfigs.first()[fsSlug]
+    }
+
+    suspend fun setSavePlatformConfig(fsSlug: String, config: SavePlatformConfig) {
+        context.dataStore.edit { prefs ->
+            val map = parseSavePlatformConfigs(prefs[Keys.SAVE_PLATFORM_CONFIGS]).toMutableMap()
+            map[fsSlug] = config
+            prefs[Keys.SAVE_PLATFORM_CONFIGS] = serializeSavePlatformConfigs(map)
+        }
+    }
+
+    suspend fun clearSavePlatformConfig(fsSlug: String) {
+        context.dataStore.edit { prefs ->
+            val map = parseSavePlatformConfigs(prefs[Keys.SAVE_PLATFORM_CONFIGS]).toMutableMap()
+            map.remove(fsSlug)
+            prefs[Keys.SAVE_PLATFORM_CONFIGS] = serializeSavePlatformConfigs(map)
+        }
+    }
+
+    private fun parseSavePlatformConfigs(json: String?): Map<String, SavePlatformConfig> {
+        if (json.isNullOrBlank()) return emptyMap()
+        return try {
+            val obj = JSONObject(json)
+            obj.keys().asSequence().mapNotNull { key ->
+                val entry = obj.getJSONObject(key)
+                val presetKey = entry.optJSONObject("preset")?.let { presetKeyFromJsonObject(it) }
+                    ?: return@mapNotNull null
+                val folderPath = entry.optString("folderPath").takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                key to SavePlatformConfig(presetKey, folderPath)
+            }.toMap()
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun serializeSavePlatformConfigs(map: Map<String, SavePlatformConfig>): String {
+        val obj = JSONObject()
+        map.forEach { (key, config) ->
+            val entry = JSONObject()
+            entry.put("preset", config.presetKey.toJsonObject())
+            entry.put("folderPath", config.folderPath)
+            obj.put(key, entry)
+        }
+        return obj.toString()
+    }
 
     // Drops every slot's baseline for a ROM (called from within an existing
     // dataStore.edit block so it composes with the enrollment-set update).

@@ -39,4 +39,8 @@ data class SavePreset(
     // The id this preset uploads in the `emulator` field (§7) -- a libretro
     // core slug for a RetroArch preset, a standalone app id otherwise.
     val emulatorId: String
+    // Setup notes (§10.x's "Required core-option change" column) live on
+    // SavePresetRegistry's RetroArchPresetInfo, not here -- keeping them in
+    // exactly one place (independent review, phase 3A fixes nits) since
+    // RetroArchPresetInfo is what the registry/UI actually reads.
 )

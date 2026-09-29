@@ -43,4 +43,31 @@ class SyncBaselinePathTest {
         val result = effectiveBaseline(baseline, null)
         assertNull(result)
     }
+
+    // requirePathRecorded (independent review, phase 3A fixes item 5): a
+    // configured (v1) platform passes true here, since a pathless baseline
+    // there was written by the legacy path before this platform had a v1
+    // config -- configuring one IS the location change §5 guards against, so
+    // it gets no "pre-v1 migration" free pass.
+
+    @Test
+    fun `on a configured platform, a pathless baseline counts as no history`() {
+        val baseline = SyncBaseline(contentHash = "hash") // no resolvedPath -- written by the legacy path
+        val result = effectiveBaseline(baseline, "/saves/snes/Zelda.srm", requirePathRecorded = true)
+        assertNull(result)
+    }
+
+    @Test
+    fun `on a legacy platform, a pathless baseline still counts as matching`() {
+        val baseline = SyncBaseline(contentHash = "hash")
+        val result = effectiveBaseline(baseline, "/saves/snes/Zelda.srm", requirePathRecorded = false)
+        assertSame(baseline, result)
+    }
+
+    @Test
+    fun `requirePathRecorded has no effect once a path IS recorded`() {
+        val baseline = SyncBaseline(contentHash = "hash", resolvedPath = "/saves/snes/Zelda.srm")
+        assertSame(baseline, effectiveBaseline(baseline, "/saves/snes/Zelda.srm", requirePathRecorded = true))
+        assertNull(effectiveBaseline(baseline, "/saves/snes-override/Zelda.srm", requirePathRecorded = true))
+    }
 }

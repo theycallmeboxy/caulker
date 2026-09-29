@@ -39,6 +39,36 @@ class FakeSaveFileSink : SaveFileSink {
     }
 }
 
+// In-memory SaveFolderScanner fake for SaveLocationResolverTest -- adds the
+// recursive listing + mtime lookup SaveFolderScanner needs on top of
+// FakeSaveFileSource's readFile/listChildren, from the same `files` map (plus
+// an explicit mtimes map, defaulting to 0L for any path not given one).
+class FakeSaveFolderScanner(
+    private val files: Map<String, ByteArray>,
+    private val mtimes: Map<String, Long> = emptyMap()
+) : SaveFolderScanner {
+    private val delegate = FakeSaveFileSource(files)
+
+    override fun readFile(relativePath: String): ByteArray? = delegate.readFile(relativePath)
+    override fun listChildren(relativePath: String): List<LocalSaveEntry> = delegate.listChildren(relativePath)
+
+    override fun listAllEntries(): List<LocalSaveEntry> {
+        val dirs = LinkedHashSet<String>()
+        val result = mutableListOf<LocalSaveEntry>()
+        for (path in files.keys) {
+            result += LocalSaveEntry(path, isDirectory = false)
+            var parent = path.substringBeforeLast('/', "")
+            while (parent.isNotEmpty() && dirs.add(parent)) {
+                parent = parent.substringBeforeLast('/', "")
+            }
+        }
+        dirs.forEach { result += LocalSaveEntry(it, isDirectory = true) }
+        return result
+    }
+
+    override fun lastModifiedMs(relativePath: String): Long = mtimes[relativePath] ?: 0L
+}
+
 // Builds a raw zip directly (bypassing packSaveZip) so tests can shape
 // exactly the archive they want to feed unpackSaveZip/hashZipContents,
 // including layouts packSaveZip itself would never produce (traversal

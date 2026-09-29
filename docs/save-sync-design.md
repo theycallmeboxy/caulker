@@ -209,7 +209,9 @@ a preset/folder change (or first-time Unassigned-file assignment) from quietly c
 an unrelated file that happens to already sit at the newly-resolved path. Baselines
 persisted before this field existed have no path recorded and are treated as matching
 (no forced re-prompt on upgrade) — this is the one exception to "no path = no history,"
-scoped specifically to the pre-v1 → v1 migration.
+scoped specifically to the pre-v1 → v1 migration, and legacy-platform-only: a pathless
+baseline on a platform that has a v1 config counts as no history, since configuring a
+platform is itself the location change this section guards against.
 
 Everything that writes a save file — Direct or Exchange, any shape — goes through the
 existing `SaveSyncLock` mutex, exactly as today.

@@ -13,7 +13,13 @@ import javax.inject.Singleton
 @Singleton
 class RootFileHelper @Inject constructor() {
 
-    fun isRootAvailable(): Boolean = Shell.isAppGrantedRoot() == true
+    // Wrapped in try/catch: libsu's Shell can throw (not just return false)
+    // if it's asked about root before any shell has ever been initialized on
+    // this process (e.g. a plain JVM unit test with no Android runtime at
+    // all -- ConfiguredSaveWriterTest/AndroidSaveFolderScannerTest hit this
+    // legitimately, exercising the "root not available" path). Either way
+    // the correct answer is "no root," never a crash.
+    fun isRootAvailable(): Boolean = try { Shell.isAppGrantedRoot() == true } catch (_: Throwable) { false }
 
     suspend fun fileExists(path: String): Boolean = withContext(Dispatchers.IO) {
         val f = File(path)
@@ -64,6 +70,18 @@ class RootFileHelper @Inject constructor() {
         } finally {
             tmp.delete()
         }
+    }
+
+    // Deletes a single file (not a directory). No-op (returns false) if it
+    // doesn't exist. Used by the v1 configured-platform save path (data/
+    // repository/SaveLocationRepository.kt) to remove a stale FILE_SET/
+    // FOLDER member after backing it up -- Part 1's legacy path never needed
+    // to delete a save file, only overwrite it, so nothing else calls this.
+    suspend fun deleteFile(path: String): Boolean = withContext(Dispatchers.IO) {
+        val f = File(path)
+        if (f.exists()) return@withContext f.delete()
+        if (!isRootAvailable()) return@withContext false
+        Shell.cmd("rm -f ${q(path)}").exec().isSuccess
     }
 
     suspend fun setLastModified(path: String, timeMs: Long) = withContext(Dispatchers.IO) {
@@ -128,6 +146,35 @@ class RootFileHelper @Inject constructor() {
                     .out.firstOrNull()?.trim()?.toLongOrNull() ?: 0L
             }
         }
+
+    // Recursively lists every file/directory under dirPath, as (path relative
+    // to dirPath using "/" separators, isDirectory) pairs, excluding dirPath
+    // itself. Used by the v1 save-location resolver's real scanner
+    // (data/saves/SaveLocationResolver.kt's SaveFolderScanner, implemented in
+    // data/repository/AndroidSaveFolderScanner.kt) to snapshot a configured
+    // platform's save folder -- Part 1's legacy path never needed a recursive
+    // listing, only single-file lookups, so nothing else calls this.
+    suspend fun listRecursive(dirPath: String): List<Pair<String, Boolean>> = withContext(Dispatchers.IO) {
+        val d = File(dirPath)
+        if (d.exists() && d.canRead()) {
+            return@withContext d.walkTopDown()
+                .filter { it != d }
+                .map { f -> f.relativeTo(d).path.replace(File.separatorChar, '/') to f.isDirectory }
+                .toList()
+        }
+        if (!isRootAvailable()) return@withContext emptyList()
+        // `find`'s -printf prints "<type>\t<path relative to dirPath>" per
+        // entry (y=f for file, d for directory), skipping dirPath itself
+        // (-mindepth 1).
+        Shell.cmd("find ${q(dirPath)} -mindepth 1 -printf '%y\\t%P\\n' 2>/dev/null").exec().out
+            .mapNotNull { line ->
+                val tab = line.indexOf('\t')
+                if (tab < 0) return@mapNotNull null
+                val isDir = line.substring(0, tab) == "d"
+                val rel = line.substring(tab + 1)
+                rel.takeIf { it.isNotBlank() }?.let { it to isDir }
+            }
+    }
 
     private fun pruneBackups(backupDir: File, baseName: String, ext: String) {
         val backups = backupDir.listFiles { f ->

@@ -261,6 +261,50 @@ class SaveRepository @Inject constructor(
         }
     }
 
+    // Uploads pre-built save bytes under an explicit filename/emulator id,
+    // without reading from or writing to any resolved local path -- used by
+    // the v1 configured-platform save path (data/repository/
+    // SaveLocationRepository.kt, save-sync design doc Part 2 §12 phase 3),
+    // whose bytes/filename come from SaveTransferPlan.kt's planSaveUpload
+    // (raw single file, or a packed zip), not from effectiveSaveDir's
+    // single-file convention. uploadSaveFromDisk (below) is the legacy,
+    // path-resolving wrapper around the same private uploadBytes(); this is
+    // the other public entry point to it.
+    suspend fun uploadSaveBytes(
+        romId: Int,
+        slotKey: String,
+        fileName: String,
+        bytes: ByteArray,
+        sessionId: Int? = null,
+        autocleanup: Boolean = true,
+        autocleanupLimit: Int = 10,
+        overwrite: Boolean = false,
+        emulatorId: String = FALLBACK_EMULATOR_ID
+    ): UploadResult {
+        val deviceId = getOrRegisterDeviceId()
+        val saved = uploadBytes(
+            romId, slotKey, fileName, deviceId, bytes, sessionId, autocleanup, autocleanupLimit, overwrite, emulatorId
+        )
+        val serverMs = parseIsoToMs(saved.updatedAt) ?: System.currentTimeMillis()
+        return UploadResult(serverMs, saved.id, saved.contentHash)
+    }
+
+    // Downloads a save's raw content and marks it downloaded, without writing
+    // to any local path -- used by the v1 configured-platform save path
+    // (data/repository/SaveLocationRepository.kt), which resolves its own
+    // (possibly multi-member) local paths via SaveTransferPlan.kt's
+    // planSaveDownload rather than effectiveSaveDir's single-file convention.
+    // downloadSave (below) still does its own on-disk write directly for the
+    // legacy path and is unchanged.
+    suspend fun downloadSaveBytes(saveId: Int, sessionId: Int? = null): ByteArray {
+        val deviceId = getOrRegisterDeviceId()
+        val response = mapForbidden { api.downloadSave(saveId, deviceId, sessionId) }
+        val body = response.body() ?: error("Empty save response from server")
+        val bytes = withContext(Dispatchers.IO) { body.bytes() }
+        mapForbidden { api.markSaveDownloaded(saveId, MarkDownloadedRequest(deviceId)) }
+        return bytes
+    }
+
     // --- Sync engine (RomM 4.9) ---
 
     // Asks the server to compute per-save sync actions for this device given the

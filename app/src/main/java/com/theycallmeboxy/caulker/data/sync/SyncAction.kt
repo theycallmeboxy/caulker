@@ -34,10 +34,20 @@ data class SyncBaseline(
 // with no recorded path at all (persisted before this field existed) is
 // treated as still matching — the one exception, scoped to the pre-v1 -> v1
 // migration, so upgrading Caulker doesn't force a re-prompt on every
-// already-synced save.
-fun effectiveBaseline(baseline: SyncBaseline?, currentResolvedPath: String?): SyncBaseline? {
+// already-synced save. This exception is legacy-only: pass
+// requirePathRecorded = true for a configured (v1) platform, where a
+// pathless baseline means the save was last synced via the legacy path and
+// has never been resolved against this platform's configured folder at all
+// -- configuring a platform IS the location change §5 exists to guard
+// against, so it gets no free pass (independent review, phase 3A fixes §5).
+fun effectiveBaseline(
+    baseline: SyncBaseline?,
+    currentResolvedPath: String?,
+    requirePathRecorded: Boolean = false
+): SyncBaseline? {
     baseline ?: return null
-    val recordedPath = baseline.resolvedPath ?: return baseline
+    val recordedPath = baseline.resolvedPath
+        ?: return if (requirePathRecorded) null else baseline
     return if (recordedPath == currentResolvedPath) baseline else null
 }
 

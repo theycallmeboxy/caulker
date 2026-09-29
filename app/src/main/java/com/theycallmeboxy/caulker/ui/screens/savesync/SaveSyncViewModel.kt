@@ -4,19 +4,25 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.theycallmeboxy.caulker.data.api.model.SaveSlotResponse
+import com.theycallmeboxy.caulker.data.db.entity.RomEntity
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
 import com.theycallmeboxy.caulker.data.repository.BackupInfo
+import com.theycallmeboxy.caulker.data.repository.ConfiguredPlatform
 import com.theycallmeboxy.caulker.data.repository.RomRepository
+import com.theycallmeboxy.caulker.data.repository.SaveLocationRepository
 import com.theycallmeboxy.caulker.data.repository.SaveRepository
+import com.theycallmeboxy.caulker.data.saves.resolvedPathFor
 import com.theycallmeboxy.caulker.data.sync.SaveSyncLock
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOrchestrator
 import com.theycallmeboxy.caulker.data.sync.SaveSyncOverallState
 import com.theycallmeboxy.caulker.data.sync.SyncAction
 import com.theycallmeboxy.caulker.data.sync.SyncBaseline
 import com.theycallmeboxy.caulker.data.sync.determineSyncAction
+import com.theycallmeboxy.caulker.data.sync.effectiveBaseline
 import com.theycallmeboxy.caulker.data.util.msToIso
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -47,12 +53,18 @@ class SaveSyncViewModel @Inject constructor(
     private val romRepository: RomRepository,
     private val prefsStore: PrefsStore,
     private val saveSyncLock: SaveSyncLock,
-    private val orchestrator: SaveSyncOrchestrator
+    private val orchestrator: SaveSyncOrchestrator,
+    // v1 save-location wiring (save-sync design doc, Part 2 §12 phase 3):
+    // null configuredPlatform() means this platform has no v1 config, so
+    // every function below falls through to the existing legacy behavior
+    // unchanged (§6 hard constraint).
+    private val saveLocationRepository: SaveLocationRepository
 ) : ViewModel() {
 
     private val romId: Int = checkNotNull(savedStateHandle["romId"])
     private var platformFsSlug: String? = null
     private var romFileName: String? = null
+    private var romEntity: RomEntity? = null
 
     private val _romName = MutableStateFlow("")
     val romName = _romName.asStateFlow()
@@ -89,6 +101,7 @@ class SaveSyncViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             val rom = romRepository.getById(romId)
+            romEntity = rom
             platformFsSlug = rom?.platformFsSlug
             romFileName = rom?.fileName
             _romName.value = rom?.name ?: ""
@@ -121,16 +134,41 @@ class SaveSyncViewModel @Inject constructor(
                     .filter { it.slot == target }
                     .maxByOrNull { it.updatedAt ?: "" }
 
-                // The single physical local file for this ROM. Resolve from the
-                // server filename when we have one, else scan the save dir by ROM base.
-                val localFileName = saveRepository.resolveLocalSaveFileName(
-                    save?.fileName, romFileName, platformFsSlug
-                ) ?: save?.fileName
-                // Read the local file's hash + mtime once so the decision can
-                // short-circuit byte-identical content (matching the server).
-                val stat = localFileName?.let { saveRepository.localSaveStat(it, platformFsSlug) }
-                val hasLocal = stat != null
-                val localMs = stat?.modifiedMs ?: 0L
+                // v1 save-location wiring (§12 phase 3): a configured platform
+                // resolves its local save via the folder/preset scan instead of
+                // effectiveSaveDir + resolveLocalSaveFileName; an unconfigured
+                // one (configured == null) keeps the exact legacy behavior below
+                // (§6 hard constraint).
+                val configured = saveLocationRepository.configuredPlatform(platformFsSlug)
+                val configuredUnit = if (configured != null) romEntity?.let { saveLocationRepository.unitFor(it) } else null
+
+                val localFileName: String?
+                val hasLocal: Boolean
+                val localMs: Long
+                val localHash: String?
+                val resolvedPath: String?
+
+                if (configured != null) {
+                    val unit = configuredUnit?.second
+                    localFileName = unit?.matchingKeyName
+                    hasLocal = unit != null
+                    localMs = unit?.modifiedMs ?: 0L
+                    localHash = unit?.contentHash
+                    resolvedPath = unit?.resolvedPath
+                } else {
+                    // The single physical local file for this ROM. Resolve from the
+                    // server filename when we have one, else scan the save dir by ROM base.
+                    localFileName = saveRepository.resolveLocalSaveFileName(
+                        save?.fileName, romFileName, platformFsSlug
+                    ) ?: save?.fileName
+                    // Read the local file's hash + mtime once so the decision can
+                    // short-circuit byte-identical content (matching the server).
+                    val stat = localFileName?.let { saveRepository.localSaveStat(it, platformFsSlug) }
+                    hasLocal = stat != null
+                    localMs = stat?.modifiedMs ?: 0L
+                    localHash = stat?.contentHash
+                    resolvedPath = null // legacy baselines never record one; see effectiveBaseline()
+                }
 
                 val slotResponse = SaveSlotResponse(
                     slot = save?.slot ?: target.takeIf { it != "default" },
@@ -139,7 +177,19 @@ class SaveSyncViewModel @Inject constructor(
                     remoteUpdatedAt = save?.updatedAt
                 )
                 val deviceSync = save?.deviceSyncs?.find { it.deviceId == deviceId }
-                val baseline = prefsStore.getSyncBaseline(romId, target)
+                // §5: a baseline recorded against a different resolved path (or no
+                // path at all, for a config change / first Unassigned-file
+                // assignment) is treated as no history, forcing a conflict prompt
+                // rather than a silent overwrite. On a configured platform a
+                // PATHLESS baseline also counts as no history (requirePathRecorded
+                // = true) -- it was written by the legacy path before this platform
+                // had a v1 config, and configuring one IS the location change §5
+                // guards against; the legacy path keeps today's "pathless =
+                // matching" exception.
+                val baseline = effectiveBaseline(
+                    prefsStore.getSyncBaseline(romId, target), resolvedPath,
+                    requirePathRecorded = configured != null
+                )
                 _status.value = SlotUiState(
                     slot = slotResponse,
                     fileName = localFileName,
@@ -148,13 +198,19 @@ class SaveSyncViewModel @Inject constructor(
                     localModifiedMs = localMs,
                     syncAction = determineSyncAction(
                         slotResponse, hasLocal, localMs, deviceSync,
-                        localHash = stat?.contentHash, remoteHash = save?.contentHash,
+                        localHash = localHash, remoteHash = save?.contentHash,
                         baseline = baseline
                     ),
                     isUntracked = deviceSync?.isUntracked ?: false,
-                    backupInfo = localFileName?.let { saveRepository.getBackupInfo(it, platformFsSlug) },
-                    localFilePath = localFileName?.let { saveRepository.getLocalFilePath(it, platformFsSlug) }
+                    backupInfo = if (configured == null) {
+                        localFileName?.let { saveRepository.getBackupInfo(it, platformFsSlug) }
+                    } else null, // TODO(phase-3-UI): per-member backup info for a configured platform
+                    localFilePath = if (configured == null) {
+                        localFileName?.let { saveRepository.getLocalFilePath(it, platformFsSlug) }
+                    } else resolvedPath
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _error.value = e.message
             } finally {
@@ -228,6 +284,8 @@ class SaveSyncViewModel @Inject constructor(
                         isError = false
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
             }
@@ -251,39 +309,107 @@ class SaveSyncViewModel @Inject constructor(
                     .filter { it.slot == slotKey }
                     .maxByOrNull { it.updatedAt ?: "" }
                     ?: error("Save not found on server for slot $slotKey")
-                val remoteMs = parseIsoToMs(save.updatedAt)
-                val localFileName = saveRepository.resolveLocalSaveFileName(
-                    save.fileName, romFileName, platformFsSlug
-                ) ?: save.fileName
-                saveRepository.downloadSave(save.id, localFileName, platformFsSlug, remoteMs)
-                val newLocalMs = saveRepository.localSaveModifiedMs(localFileName, platformFsSlug)
-                val newLocalPath = saveRepository.getLocalFilePath(localFileName, platformFsSlug)
-                val newBackupInfo = saveRepository.getBackupInfo(localFileName, platformFsSlug)
-                // Now that the local file matches what the server had, that content
-                // hash becomes the new common-ancestor baseline for future decisions.
-                val baselineHash = save.contentHash
-                    ?: saveRepository.localSaveStat(localFileName, platformFsSlug)?.contentHash
-                if (baselineHash != null) {
-                    prefsStore.setSyncBaseline(romId, slotKey, SyncBaseline(baselineHash, save.id, save.updatedAt))
+
+                val configured = saveLocationRepository.configuredPlatform(platformFsSlug)
+                if (configured != null) {
+                    downloadConfigured(configured, save, slotKey)
+                } else {
+                    downloadLegacy(save, slotKey)
                 }
-                setStatus {
-                    it.copy(
-                        isSyncing = false,
-                        hasLocalFile = true,
-                        localModifiedMs = newLocalMs,
-                        syncAction = SyncAction.UP_TO_DATE,
-                        message = "Downloaded $localFileName",
-                        isError = false,
-                        fileName = localFileName,
-                        localFilePath = newLocalPath,
-                        backupInfo = newBackupInfo
-                    )
-                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
             } finally {
                 saveSyncLock.mutex.unlock()
             }
+        }
+    }
+
+    private suspend fun downloadLegacy(save: com.theycallmeboxy.caulker.data.api.model.SaveResponse, slotKey: String) {
+        val remoteMs = parseIsoToMs(save.updatedAt)
+        val localFileName = saveRepository.resolveLocalSaveFileName(
+            save.fileName, romFileName, platformFsSlug
+        ) ?: save.fileName
+        saveRepository.downloadSave(save.id, localFileName, platformFsSlug, remoteMs)
+        val newLocalMs = saveRepository.localSaveModifiedMs(localFileName, platformFsSlug)
+        val newLocalPath = saveRepository.getLocalFilePath(localFileName, platformFsSlug)
+        val newBackupInfo = saveRepository.getBackupInfo(localFileName, platformFsSlug)
+        // Now that the local file matches what the server had, that content
+        // hash becomes the new common-ancestor baseline for future decisions.
+        val baselineHash = save.contentHash
+            ?: saveRepository.localSaveStat(localFileName, platformFsSlug)?.contentHash
+        if (baselineHash != null) {
+            prefsStore.setSyncBaseline(romId, slotKey, SyncBaseline(baselineHash, save.id, save.updatedAt))
+        }
+        setStatus {
+            it.copy(
+                isSyncing = false,
+                hasLocalFile = true,
+                localModifiedMs = newLocalMs,
+                syncAction = SyncAction.UP_TO_DATE,
+                message = "Downloaded $localFileName",
+                isError = false,
+                fileName = localFileName,
+                localFilePath = newLocalPath,
+                backupInfo = newBackupInfo
+            )
+        }
+    }
+
+    // v1 configured-platform download (§12 phase 3): SaveLocationRepository
+    // decides raw-vs-zip placement (SaveTransferPlan.kt, verified against
+    // Argosy) and backs up every member it's about to overwrite (§6) before
+    // writing. A Refused placement (a genuine format mismatch, never a
+    // guess -- see SaveTransferPlan.kt) surfaces its reason as an error
+    // instead of silently doing nothing.
+    private suspend fun downloadConfigured(
+        configured: ConfiguredPlatform,
+        save: com.theycallmeboxy.caulker.data.api.model.SaveResponse,
+        slotKey: String
+    ) {
+        // preset-aware: SAVE_TARGET-matched presets (Dreamcast, PSP) key on
+        // RomEntity.saveTarget, not the ROM filename.
+        val matchingKeyName = romEntity?.let { saveLocationRepository.matchingKeyNameFor(configured.preset, it) }
+            ?: error("Cannot resolve a matching-key name for this ROM")
+        // The unit as it stood before this download, so SaveLocationRepository
+        // can clean up any stale member the new content doesn't include (§12
+        // phase 3 fixes item 3) -- a scan failure here propagates as a real
+        // error (caught by download()'s own try/catch above), not "no local
+        // save."
+        val previousUnit = romEntity?.let { saveLocationRepository.unitFor(it) }?.second
+        val outcome = saveLocationRepository.download(
+            configured, matchingKeyName, save.id, save.fileName,
+            incomingEmulatorId = save.emulator, previousUnit = previousUnit
+        )
+        if (!outcome.success) {
+            // Nothing was written (or a partial write was rolled back) --
+            // never record a baseline for a failed/refused download.
+            setStatus { it.copy(isSyncing = false, message = outcome.reason, isError = true) }
+            return
+        }
+        // §5 path (item 1) and hash fallback (item 2) both come from what was
+        // ACTUALLY just written -- resolvedPathFor is the same function
+        // buildUnit uses so a FOLDER save's path always agrees with what the
+        // next scan computes, and writtenContentHash is the new content's
+        // own hash, never previousUnit's stale pre-download one.
+        val resolvedPath = resolvedPathFor(configured.folderPath, configured.preset.shape, outcome.writtenRelativePaths)
+        val baselineHash = save.contentHash ?: outcome.writtenContentHash
+        if (baselineHash != null) {
+            prefsStore.setSyncBaseline(
+                romId, slotKey, SyncBaseline(baselineHash, save.id, save.updatedAt, resolvedPath = resolvedPath)
+            )
+        }
+        setStatus {
+            it.copy(
+                isSyncing = false,
+                hasLocalFile = true,
+                syncAction = SyncAction.UP_TO_DATE,
+                message = "Downloaded $matchingKeyName",
+                isError = false,
+                fileName = matchingKeyName,
+                localFilePath = resolvedPath
+            )
         }
     }
 
@@ -300,12 +426,30 @@ class SaveSyncViewModel @Inject constructor(
             }
             setStatus { it.copy(isSyncing = true, message = null, isError = false) }
             try {
-                val result = saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug, overwrite = overwrite)
-                val newBackupInfo = saveRepository.getBackupInfo(fileName, platformFsSlug)
+                val configured = saveLocationRepository.configuredPlatform(platformFsSlug)
+                // Captured once and reused for both the upload call and the
+                // baseline's resolvedPath -- upload() never mutates local files,
+                // so re-scanning afterward to get the same unit's resolvedPath
+                // again would just be a wasted read (item 7's scan-cost concern).
+                val configuredUnit = if (configured != null) {
+                    romEntity?.let { saveLocationRepository.unitFor(it) }?.second
+                        ?: error("No local save found for \"$fileName\" in the configured folder")
+                } else null
+                val result = if (configured != null && configuredUnit != null) {
+                    saveLocationRepository.upload(configured, configuredUnit, romId, slotKey, overwrite = overwrite)
+                } else {
+                    saveRepository.uploadSaveFromDisk(romId, slotKey, fileName, platformFsSlug, overwrite = overwrite)
+                }
+                val newBackupInfo = if (configured == null) saveRepository.getBackupInfo(fileName, platformFsSlug) else null
                 // The server now holds exactly what we just uploaded — record its
                 // hash as the new common-ancestor baseline for future decisions.
+                // §5: on a configured platform, the baseline also records the
+                // resolved local path it was uploaded from.
+                val resolvedPath = configuredUnit?.resolvedPath
                 result.contentHash?.let { hash ->
-                    prefsStore.setSyncBaseline(romId, slotKey, SyncBaseline(hash, result.saveId, msToIso(result.serverMs)))
+                    prefsStore.setSyncBaseline(
+                        romId, slotKey, SyncBaseline(hash, result.saveId, msToIso(result.serverMs), resolvedPath)
+                    )
                 }
                 setStatus {
                     it.copy(
@@ -322,6 +466,8 @@ class SaveSyncViewModel @Inject constructor(
                         )
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 setStatus { it.copy(isSyncing = false, message = e.message, isError = true) }
             } finally {
