@@ -517,5 +517,8 @@ private fun com.theycallmeboxy.caulker.data.api.model.RomResponse.toEntity() = R
     filesJson = com.theycallmeboxy.caulker.data.db.entity.RomFile.serializeList(
         files.map { com.theycallmeboxy.caulker.data.db.entity.RomFile(it.fileName, it.fileSize) }
     ),
-    updatedAt = updatedAt
+    updatedAt = updatedAt,
+    titleId = titleId,
+    saveTarget = saveTarget,
+    saveTargetLayout = saveTargetLayout
 )

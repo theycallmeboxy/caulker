@@ -13,12 +13,33 @@ enum class SyncAction { NONE, UPLOAD, DOWNLOAD, UP_TO_DATE, CONFLICT }
 // synced (uploaded, downloaded, or resolved a conflict for). Persisted in
 // PrefsStore and used as the common ancestor for the 3-way merge below.
 // saveId/updatedAt are diagnostic only — the decision only ever looks at
-// contentHash.
+// contentHash. resolvedPath is the local file path this baseline was recorded
+// against (save-sync design doc, Part 2 §5) — see effectiveBaseline() below;
+// null for a baseline persisted before this field existed (pre-v1) or by a
+// caller that hasn't started recording it yet.
 data class SyncBaseline(
     val contentHash: String,
     val saveId: Int? = null,
-    val updatedAt: String? = null
+    val updatedAt: String? = null,
+    val resolvedPath: String? = null
 )
+
+// Applies the §5 baseline-path safety rule ahead of determineSyncAction(): a
+// baseline recorded against a different resolved local path than the one in
+// use now is treated as if no baseline existed at all, forcing
+// determineSyncAction() into its no-history branch (CONFLICT on a hash
+// mismatch) instead of silently comparing against an unrelated file that
+// happens to already sit at the newly-resolved path — e.g. after a
+// preset/folder change or a first-time Unassigned-file assignment. A baseline
+// with no recorded path at all (persisted before this field existed) is
+// treated as still matching — the one exception, scoped to the pre-v1 -> v1
+// migration, so upgrading Caulker doesn't force a re-prompt on every
+// already-synced save.
+fun effectiveBaseline(baseline: SyncBaseline?, currentResolvedPath: String?): SyncBaseline? {
+    baseline ?: return null
+    val recordedPath = baseline.resolvedPath ?: return baseline
+    return if (recordedPath == currentResolvedPath) baseline else null
+}
 
 // Client-side 3-way merge by content hash. RomM's own device_syncs endpoint
 // (GET /api/saves?device_id=...) synthesizes a *placeholder* device_sync entry

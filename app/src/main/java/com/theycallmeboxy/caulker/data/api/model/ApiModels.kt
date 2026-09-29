@@ -78,7 +78,17 @@ data class RomResponse(
     @Json(name = "has_multiple_files") val hasMultipleFiles: Boolean = false,
     val files: List<RomFileResponse> = emptyList(),
     @Json(name = "created_at") val createdAt: String? = null,
-    @Json(name = "updated_at") val updatedAt: String? = null
+    @Json(name = "updated_at") val updatedAt: String? = null,
+    // RomM 5.3+ save-matching fields (server-computed by its scan pipeline, not
+    // client-supplied). Absent on older servers -> null, and save matching
+    // falls back to ROM-stem matching / the Unassigned list (save-sync design
+    // doc, Part 2 §3/§4). save_target_layout is kept as the server's raw wire
+    // string here (e.g. "folder-prefix") rather than an enum, so an unknown
+    // future value from a newer server still deserializes instead of failing
+    // the whole ROM row -- data/saves/SaveTargetLayout.fromWire() parses it.
+    @Json(name = "title_id") val titleId: String? = null,
+    @Json(name = "save_target") val saveTarget: String? = null,
+    @Json(name = "save_target_layout") val saveTargetLayout: String? = null
 )
 
 @JsonClass(generateAdapter = true)

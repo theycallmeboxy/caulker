@@ -14,6 +14,7 @@ import com.theycallmeboxy.caulker.data.api.model.SyncNegotiateRequest
 import com.theycallmeboxy.caulker.data.api.model.SyncNegotiateResponse
 import com.theycallmeboxy.caulker.data.prefs.PlatformOverrideMode
 import com.theycallmeboxy.caulker.data.prefs.PrefsStore
+import com.theycallmeboxy.caulker.data.saves.FALLBACK_EMULATOR_ID
 import com.theycallmeboxy.caulker.data.util.RootFileHelper
 import com.theycallmeboxy.caulker.data.util.md5Hex
 import com.theycallmeboxy.caulker.data.util.parseIsoToMs
@@ -199,14 +200,18 @@ class SaveRepository @Inject constructor(
         autocleanupLimit: Int = 10,
         // When true, force the server to accept this upload even if a newer save
         // exists in the slot — used by conflict "Keep Local" so it can actually win.
-        overwrite: Boolean = false
+        overwrite: Boolean = false,
+        // The `emulator` id to upload (§7) — the configured preset's id, or
+        // FALLBACK_EMULATOR_ID ("caulker") when no preset is configured for
+        // this platform, exactly as today (data/saves/SaveEmulatorId.kt).
+        emulatorId: String = FALLBACK_EMULATOR_ID
     ): UploadResult {
         val dir = effectiveSaveDir(platformFsSlug)
             ?: error("Save folder not configured — go to Settings")
         val bytes = rootHelper.readBytes("$dir/$fileName")
         val deviceId = getOrRegisterDeviceId()
         val saved = uploadBytes(
-            romId, slotKey, fileName, deviceId, bytes, sessionId, autocleanup, autocleanupLimit, overwrite
+            romId, slotKey, fileName, deviceId, bytes, sessionId, autocleanup, autocleanupLimit, overwrite, emulatorId
         )
         val serverMs = parseIsoToMs(saved.updatedAt) ?: System.currentTimeMillis()
         rootHelper.setLastModified("$dir/$fileName", serverMs)
@@ -227,7 +232,8 @@ class SaveRepository @Inject constructor(
         sessionId: Int? = null,
         autocleanup: Boolean = true,
         autocleanupLimit: Int = 10,
-        overwrite: Boolean = false
+        overwrite: Boolean = false,
+        emulatorId: String = FALLBACK_EMULATOR_ID
     ): SaveResponse = withContext(Dispatchers.IO) {
         val tmp = File(context.cacheDir, "save_upload_$fileName")
         try {
@@ -239,7 +245,7 @@ class SaveRepository @Inject constructor(
                     romId = romId,
                     deviceId = deviceId,
                     slot = slotKey,
-                    emulator = "caulker",
+                    emulator = emulatorId,
                     overwrite = overwrite,
                     sessionId = sessionId,
                     autocleanup = autocleanup,

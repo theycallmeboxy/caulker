@@ -41,7 +41,14 @@ data class RomEntity(
     // JSON-encoded list of {fileName, fileSize} pairs from the server. Null for
     // single-file ROMs. Use RomFile.parseList / serializeList to convert.
     val filesJson: String? = null,
-    val updatedAt: String? = null
+    val updatedAt: String? = null,
+    // RomM 5.3+ save-matching fields -- see RomResponse for provenance. Null on
+    // a pre-5.3 server or an un-scanned ROM; save_target_layout is the raw
+    // server string ("folder-prefix", etc.), parsed by
+    // data/saves/SaveTargetLayout.fromWire() at the point of use.
+    val titleId: String? = null,
+    val saveTarget: String? = null,
+    val saveTargetLayout: String? = null
 )
 
 @Entity(tableName = "collections")

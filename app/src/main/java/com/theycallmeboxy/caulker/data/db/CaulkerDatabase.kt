@@ -12,7 +12,11 @@ import com.theycallmeboxy.caulker.data.db.entity.*
         CollectionEntity::class,
         SaveEntity::class
     ],
-    version = 5,
+    // v6: adds RomEntity.titleId/saveTarget/saveTargetLayout (RomM 5.3+ save-
+    // matching fields, save-sync design doc Part 2 §4). No Migration object --
+    // follows the project's existing pattern of a destructive migration
+    // (AppModule.provideDatabase) since this is a re-fetchable server cache.
+    version = 6,
     exportSchema = false
 )
 abstract class CaulkerDatabase : RoomDatabase() {

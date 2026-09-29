@@ -172,7 +172,8 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
             SyncBaseline(
                 contentHash = hash,
                 saveId = entry.optInt("saveId", -1).takeIf { it >= 0 },
-                updatedAt = entry.optString("updatedAt").takeIf { it.isNotBlank() }
+                updatedAt = entry.optString("updatedAt").takeIf { it.isNotBlank() },
+                resolvedPath = entry.optString("path").takeIf { it.isNotBlank() }
             )
         } catch (_: Exception) { null }
     }
@@ -186,6 +187,7 @@ class PrefsStore @Inject constructor(@ApplicationContext private val context: Co
             entry.put("hash", baseline.contentHash)
             baseline.saveId?.let { entry.put("saveId", it) }
             baseline.updatedAt?.let { entry.put("updatedAt", it) }
+            baseline.resolvedPath?.let { entry.put("path", it) }
             obj.put(baselineKey(romId, slotKey), entry)
             prefs[Keys.SAVE_SYNC_BASELINE] = obj.toString()
         }
