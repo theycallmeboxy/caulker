@@ -8,9 +8,15 @@ import android.os.Build
 object NotificationChannels {
     const val SAVE_SYNC_ID = "save_sync"
     const val SAVE_SYNC_NOTIFICATION_ID = 1001
+    // Dismissable "complete"/"failed" result, kept apart from the ongoing progress
+    // notification (see DOWNLOAD_RESULT_NOTIFICATION_ID).
+    const val SAVE_SYNC_RESULT_NOTIFICATION_ID = 1004
 
     const val DOWNLOAD_ID = "collection_download"
     const val DOWNLOAD_NOTIFICATION_ID = 1002
+    // Separate id for the dismissable "downloaded"/"failed" result so it can never be
+    // confused with (or overwritten by a late update of) the ongoing progress notification.
+    const val DOWNLOAD_RESULT_NOTIFICATION_ID = 1003
 
     fun ensureCreated(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

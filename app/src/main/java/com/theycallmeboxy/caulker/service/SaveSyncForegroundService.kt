@@ -36,7 +36,7 @@ class SaveSyncForegroundService : android.app.Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             orchestrator.cancel()
-            stopAndCleanup(removeNotification = true)
+            stopAndCleanup()
             return START_NOT_STICKY
         }
 
@@ -77,7 +77,7 @@ class SaveSyncForegroundService : android.app.Service() {
             is SaveSyncOverallState.Done -> {
                 val checked = state.uploaded + state.downloaded + state.skipped + state.errors
                 nm.notify(
-                    NotificationChannels.SAVE_SYNC_NOTIFICATION_ID,
+                    NotificationChannels.SAVE_SYNC_RESULT_NOTIFICATION_ID,
                     buildFinalNotification(
                         title = "Save sync complete",
                         body = "$checked games checked — uploaded ${state.uploaded}, downloaded ${state.downloaded}" +
@@ -88,7 +88,7 @@ class SaveSyncForegroundService : android.app.Service() {
             }
             is SaveSyncOverallState.Error -> {
                 nm.notify(
-                    NotificationChannels.SAVE_SYNC_NOTIFICATION_ID,
+                    NotificationChannels.SAVE_SYNC_RESULT_NOTIFICATION_ID,
                     buildFinalNotification(title = "Save sync failed", body = state.message)
                 )
                 stopAndCleanup()
@@ -103,19 +103,23 @@ class SaveSyncForegroundService : android.app.Service() {
         }
     }
 
-    // removeNotification=true dismisses the notification (user tapped Cancel);
-    // false detaches it so the final Done/Failed notification stays in the shade.
-    private fun stopAndCleanup(removeNotification: Boolean = false) {
+    // Always removes the ongoing progress notification: Done/Error post their
+    // own dismissable result under SAVE_SYNC_RESULT_NOTIFICATION_ID. Detaching
+    // the progress notification instead could leave an ongoing, unswipeable
+    // entry behind if its final update was ever dropped.
+    private fun stopAndCleanup() {
         observerJob?.cancel()
         observerJob = null
         scope?.cancel()
         scope = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(if (removeNotification) STOP_FOREGROUND_REMOVE else STOP_FOREGROUND_DETACH)
+            stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
-            stopForeground(removeNotification)
+            stopForeground(true)
         }
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .cancel(NotificationChannels.SAVE_SYNC_NOTIFICATION_ID)
         stopSelf()
     }
 

@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.theycallmeboxy.caulker.MainActivity
@@ -34,12 +35,18 @@ class DownloadForegroundService : android.app.Service() {
     private var scope: CoroutineScope? = null
     private var observerJob: Job? = null
 
+    // Last posted progress, for throttling notification updates (see handleState).
+    private var lastLabel: String? = null
+    private var lastTitle: String? = null
+    private var lastPercent = -1
+    private var lastNotifyAt = 0L
+
     override fun onBind(intent: Intent?) = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             orchestrator.cancel()
-            stopAndCleanup(removeNotification = true)
+            stopAndCleanup()
             return START_NOT_STICKY
         }
 
@@ -60,14 +67,32 @@ class DownloadForegroundService : android.app.Service() {
             is BulkDownloadState.Downloading -> {
                 val label = "Downloading ${state.done + 1} of ${state.total}" +
                     (state.currentRomName?.let { " — $it" } ?: "")
+                // Overall percent, including progress through the current ROM, so
+                // the bar moves during a single large download.
+                val percent = if (state.total > 0) {
+                    (((state.done + state.currentFraction) / state.total) * 100).toInt().coerceIn(0, 100)
+                } else 0
+                // The orchestrator emits on every chunk. Re-posting that often gets
+                // the app rate-limited by NotificationManager, which then drops
+                // updates -- including, once, the final one, leaving a stale
+                // undismissable "Downloading" notification behind. Only post when
+                // the text changes, or the percent changes and enough time has passed.
+                val now = SystemClock.elapsedRealtime()
+                val textChanged = label != lastLabel || state.label != lastTitle
+                val percentChanged = percent != lastPercent
+                if (!textChanged && (!percentChanged || now - lastNotifyAt < MIN_UPDATE_INTERVAL_MS)) return
+                lastLabel = label
+                lastTitle = state.label
+                lastPercent = percent
+                lastNotifyAt = now
                 nm.notify(
                     NotificationChannels.DOWNLOAD_NOTIFICATION_ID,
                     buildNotification(
                         initial = false,
                         title = state.label,
                         label = label,
-                        progress = state.done,
-                        max = state.total
+                        progress = percent,
+                        max = 100
                     )
                 )
             }
@@ -77,20 +102,22 @@ class DownloadForegroundService : android.app.Service() {
                     if (state.skipped > 0) append(", ${state.skipped} already present")
                     if (state.failed > 0) append(", ${state.failed} failed")
                 }
+                // Result goes out under its own id, so it's independent of the
+                // ongoing progress notification (removed in stopAndCleanup).
                 nm.notify(
-                    NotificationChannels.DOWNLOAD_NOTIFICATION_ID,
+                    NotificationChannels.DOWNLOAD_RESULT_NOTIFICATION_ID,
                     buildFinalNotification(title = "${state.label} downloaded", body = body)
                 )
                 // A queued request is about to start (DownloadOrchestrator drains
                 // its queue before this coroutine's job actually ends) -- stay in
-                // the foreground so its Downloading state overwrites this
+                // the foreground so its Downloading state takes over the progress
                 // notification instead of the service tearing itself down and a
                 // new one having to be started.
                 if (!state.hasMore) stopAndCleanup()
             }
             is BulkDownloadState.Error -> {
                 nm.notify(
-                    NotificationChannels.DOWNLOAD_NOTIFICATION_ID,
+                    NotificationChannels.DOWNLOAD_RESULT_NOTIFICATION_ID,
                     buildFinalNotification(title = "Download failed", body = state.message)
                 )
                 stopAndCleanup()
@@ -102,24 +129,32 @@ class DownloadForegroundService : android.app.Service() {
                 // set on cancellation (completion goes through Done/Error), so this
                 // is always a cancel — remove the notification rather than leaving
                 // a stale one behind.
-                if (!orchestrator.isRunning()) stopAndCleanup(removeNotification = true)
+                if (!orchestrator.isRunning()) stopAndCleanup()
             }
         }
     }
 
-    // removeNotification=true dismisses the notification (user tapped Cancel);
-    // false detaches it so a final "Done/Failed" notification stays in the shade.
-    private fun stopAndCleanup(removeNotification: Boolean = false) {
+    // Always removes the ongoing progress notification: completion and failure
+    // post their own dismissable result under DOWNLOAD_RESULT_NOTIFICATION_ID,
+    // and a cancel needs no result at all. Detaching the progress notification
+    // instead (the old behavior) could leave an ongoing, unswipeable
+    // "Downloading" entry behind whenever its final update was dropped.
+    private fun stopAndCleanup() {
         observerJob?.cancel()
         observerJob = null
         scope?.cancel()
         scope = null
+        lastLabel = null
+        lastTitle = null
+        lastPercent = -1
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(if (removeNotification) STOP_FOREGROUND_REMOVE else STOP_FOREGROUND_DETACH)
+            stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
-            stopForeground(removeNotification)
+            stopForeground(true)
         }
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .cancel(NotificationChannels.DOWNLOAD_NOTIFICATION_ID)
         stopSelf()
     }
 
@@ -192,6 +227,7 @@ class DownloadForegroundService : android.app.Service() {
 
     companion object {
         const val ACTION_CANCEL = "com.theycallmeboxy.caulker.DOWNLOAD_CANCEL"
+        private const val MIN_UPDATE_INTERVAL_MS = 500L
 
         fun start(context: Context) {
             val intent = Intent(context, DownloadForegroundService::class.java)
